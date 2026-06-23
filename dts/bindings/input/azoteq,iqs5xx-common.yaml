@@ -61,3 +61,11 @@ properties:
     description: |
       How far a finger must move (in pixels) to not be considered stationary.
     default: 5
+
+  active-report-rate:
+    type: int
+    description: |
+      Active mode report rate in milliseconds. Lower values produce a smoother,
+      more responsive cursor (e.g. 7 ~= 143 Hz, 5 = 200 Hz). 0 keeps the chip
+      default (10 ms / 100 Hz).
+    default: 0

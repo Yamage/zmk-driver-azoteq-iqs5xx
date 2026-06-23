@@ -245,6 +245,15 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
+    // Optionally raise the active mode report rate for a smoother cursor.
+    if (config->active_report_rate != 0) {
+        ret = iqs5xx_write_reg16(dev, IQS5XX_ACTIVE_REPORT_RATE, config->active_report_rate);
+        if (ret < 0) {
+            LOG_ERR("Failed to set active report rate: %d", ret);
+            return ret;
+        }
+    }
+
     ret = iqs5xx_write_reg8(dev, IQS5XX_BOTTOM_BETA, config->bottom_beta);
     if (ret < 0) {
         LOG_ERR("Failed to set bottom beta: %d", ret);
@@ -440,6 +449,7 @@ static int iqs5xx_init(const struct device *dev) {
         .flip_y = DT_INST_PROP(n, flip_y),                                                         \
         .bottom_beta = DT_INST_PROP_OR(n, bottom_beta, 5),                                         \
         .stationary_threshold = DT_INST_PROP_OR(n, stationary_threshold, 5),                       \
+        .active_report_rate = DT_INST_PROP_OR(n, active_report_rate, 0),                           \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, iqs5xx_init, NULL, &iqs5xx_data_##n, &iqs5xx_config_##n, POST_KERNEL, \
                           CONFIG_INPUT_INIT_PRIORITY, NULL);

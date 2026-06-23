@@ -13,6 +13,9 @@
 
 #define IQS5XX_END_COMM_WINDOW 0xEEEE
 
+// Active mode report rate, in ms (2 bytes wide). Lower = faster/smoother.
+#define IQS5XX_ACTIVE_REPORT_RATE 0x057A
+
 #define IQS5XX_SYSTEM_CONTROL_0 0x0431
 // System Control 0 bits.
 #define IQS5XX_ACK_RESET BIT(7)
@@ -135,6 +138,9 @@ struct iqs5xx_config {
     // Sensitivity. configuration.
     uint8_t bottom_beta;
     uint8_t stationary_threshold;
+
+    // Active mode report rate in ms (0 keeps the chip default).
+    uint16_t active_report_rate;
 };
 
 struct iqs5xx_data {
