@@ -238,6 +238,39 @@ static void iqs5xx_rdy_handler(const struct device *port, struct gpio_callback *
     k_work_submit(&data->work);
 }
 
+/*
+ * DIAG/fallback: poll the RDY line. Some boards do not get a working
+ * edge interrupt on the RDY pin (e.g. NFC pins, GPIOTE channel issues). This
+ * periodically logs RDY level changes AND, while RDY is asserted, submits the
+ * work handler so the trackpad still functions via polling. Safe because the
+ * device only accepts I2C while RDY is high (a comm window is open).
+ */
+static const struct device *diag_dev;
+static void iqs5xx_rdy_poll(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(diag_rdy_work, iqs5xx_rdy_poll);
+
+static void iqs5xx_rdy_poll(struct k_work *work) {
+    static int last_level = -1;
+
+    if (diag_dev != NULL) {
+        const struct iqs5xx_config *config = diag_dev->config;
+        struct iqs5xx_data *data = diag_dev->data;
+        int level = gpio_pin_get_dt(&config->rdy_gpio);
+
+        if (level != last_level) {
+            LOG_INF("DIAG rdy level -> %d", level);
+            last_level = level;
+        }
+
+        /* RDY asserted: a comm window is open, service the device by polling. */
+        if (level > 0) {
+            k_work_submit(&data->work);
+        }
+    }
+
+    k_work_reschedule(&diag_rdy_work, K_MSEC(20));
+}
+
 static int iqs5xx_setup_device(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     int ret;
@@ -419,6 +452,10 @@ static int iqs5xx_init(const struct device *dev) {
         LOG_ERR("Failed to configure RDY interrupt: %d", ret);
         return ret;
     }
+
+    /* DIAG/fallback: start polling RDY (logs level + services while asserted). */
+    diag_dev = dev;
+    k_work_schedule(&diag_rdy_work, K_MSEC(20));
 
     data->initialized = true;
     LOG_INF("IQS5xx trackpad initialized");
