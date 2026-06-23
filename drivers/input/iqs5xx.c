@@ -110,6 +110,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
         goto end_comm;
     }
 
+    /* DIAG: confirms the RDY interrupt fired and we are inside a comm window. */
+    LOG_INF("DIAG wh: si0=0x%02x si1=0x%02x ge0=0x%02x ge1=0x%02x", sys_info_0, sys_info_1,
+            gesture_events_0, gesture_events_1);
+
     // Handle reset indication.
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
         LOG_INF("Device reset detected");
@@ -216,6 +220,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
         }
 
         if (rel_x != 0 || rel_y != 0) {
+            LOG_INF("DIAG move: rel_x=%d rel_y=%d fingers=%d", rel_x, rel_y, num_fingers);
             input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
         }
