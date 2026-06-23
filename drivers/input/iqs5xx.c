@@ -371,6 +371,37 @@ static int iqs5xx_init(const struct device *dev) {
         return ret;
     }
 
+    /*
+     * The IQS5xx only accepts I2C transactions while RDY is asserted (its
+     * communication window). The original code waited a fixed 100ms and then
+     * wrote the configuration blindly, which NACKs (-EIO) when the window is
+     * closed. Instead, wait for RDY to assert before each setup attempt and
+     * retry a few times.
+     */
+    for (int attempt = 0; attempt < 10; attempt++) {
+        int waited = 0;
+        while (gpio_pin_get_dt(&config->rdy_gpio) <= 0 && waited < 100) {
+            k_msleep(1);
+            waited++;
+        }
+
+        ret = iqs5xx_setup_device(dev);
+        if (ret == 0) {
+            break;
+        }
+
+        LOG_WRN("Setup attempt %d failed (%d), retrying", attempt + 1, ret);
+        k_msleep(10);
+    }
+    if (ret < 0) {
+        LOG_ERR("Failed to setup device: %d", ret);
+        return ret;
+    }
+
+    /*
+     * Enable the RDY interrupt only AFTER setup, to avoid the work handler
+     * racing for the bus during initialization.
+     */
     gpio_init_callback(&data->rdy_cb, iqs5xx_rdy_handler, BIT(config->rdy_gpio.pin));
     ret = gpio_add_callback(config->rdy_gpio.port, &data->rdy_cb);
     if (ret < 0) {
@@ -381,16 +412,6 @@ static int iqs5xx_init(const struct device *dev) {
     ret = gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_RISING);
     if (ret < 0) {
         LOG_ERR("Failed to configure RDY interrupt: %d", ret);
-        return ret;
-    }
-
-    // Wait for device to be ready.
-    k_msleep(100);
-
-    // Setup device configuration.
-    ret = iqs5xx_setup_device(dev);
-    if (ret < 0) {
-        LOG_ERR("Failed to setup device: %d", ret);
         return ret;
     }
 
