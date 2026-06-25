@@ -18,6 +18,17 @@
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
+/*
+ * Dedicated workqueue for servicing trackpad reports. Keeping report processing
+ * off the shared system workqueue (which also handles BLE, split comms, etc.)
+ * avoids head-of-line blocking and reduces the report-to-report jitter that
+ * makes the cursor look low-framerate. Shared across all instances (there is
+ * only ever one trackpad).
+ */
+K_THREAD_STACK_DEFINE(iqs5xx_work_q_stack, CONFIG_INPUT_AZOTEQ_IQS5XX_WORKQUEUE_STACK_SIZE);
+static struct k_work_q iqs5xx_work_q;
+static bool iqs5xx_work_q_started;
+
 static int iqs5xx_write_reg16(const struct device *dev, uint16_t reg, uint16_t val) {
     const struct iqs5xx_config *config = dev->config;
     uint8_t buf[4] = {reg >> 8, reg & 0xFF, val >> 8, val & 0xFF};
@@ -189,7 +200,7 @@ static void iqs5xx_rdy_handler(const struct device *port, struct gpio_callback *
                                gpio_port_pins_t pins) {
     struct iqs5xx_data *data = CONTAINER_OF(cb, struct iqs5xx_data, rdy_cb);
 
-    k_work_submit(&data->work);
+    k_work_submit_to_queue(&iqs5xx_work_q, &data->work);
 }
 
 static int iqs5xx_setup_device(const struct device *dev) {
@@ -323,6 +334,16 @@ static int iqs5xx_init(const struct device *dev) {
     data->dev = dev;
     k_work_init(&data->work, iqs5xx_work_handler);
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
+
+    // Start the dedicated report workqueue once (shared across instances).
+    if (!iqs5xx_work_q_started) {
+        k_work_queue_init(&iqs5xx_work_q);
+        k_work_queue_start(&iqs5xx_work_q, iqs5xx_work_q_stack,
+                           K_THREAD_STACK_SIZEOF(iqs5xx_work_q_stack),
+                           CONFIG_INPUT_AZOTEQ_IQS5XX_WORKQUEUE_PRIORITY, NULL);
+        k_thread_name_set(&iqs5xx_work_q.thread, "iqs5xx");
+        iqs5xx_work_q_started = true;
+    }
 
     // Configure reset GPIO if available.
     if (config->reset_gpio.port) {

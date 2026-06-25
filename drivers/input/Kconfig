@@ -17,4 +17,21 @@ config INPUT_AZOTEQ_IQS5XX_INIT_PRIORITY
       Driver initialization priority for the IQS5xx driver.
       Lower values initialize earlier.
 
+config INPUT_AZOTEQ_IQS5XX_WORKQUEUE_STACK_SIZE
+    int "Azoteq IQS5xx dedicated workqueue stack size"
+    default 1024
+    help
+      Stack size (bytes) for the dedicated workqueue thread that services
+      trackpad reports. Servicing reports on a dedicated queue keeps them off
+      the shared system workqueue, reducing jitter for a smoother cursor.
+
+config INPUT_AZOTEQ_IQS5XX_WORKQUEUE_PRIORITY
+    int "Azoteq IQS5xx dedicated workqueue thread priority"
+    default -1
+    help
+      Thread priority for the dedicated trackpad workqueue. Lower numbers are
+      higher priority; negative values are cooperative. A higher priority
+      delivers trackpad reports with less jitter at the cost of preempting
+      lower-priority work.
+
 endif # INPUT_AZOTEQ_IQS5XX
