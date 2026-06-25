@@ -69,3 +69,19 @@ properties:
       more responsive cursor (e.g. 7 ~= 143 Hz, 5 = 200 Hz). 0 keeps the chip
       default (10 ms / 100 Hz).
     default: 0
+
+  x-resolution:
+    type: int
+    description: |
+      Trackpad X resolution (max coordinate). Higher values give the chip finer
+      internal tracking, producing smoother slow movement (less "staircase")
+      at the cost of higher effective sensitivity; compensate the cursor speed
+      with an input-processor scaler. 0 keeps the chip default.
+    default: 0
+
+  y-resolution:
+    type: int
+    description: |
+      Trackpad Y resolution (max coordinate). See x-resolution. 0 keeps the
+      chip default.
+    default: 0

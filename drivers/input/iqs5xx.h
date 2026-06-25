@@ -11,6 +11,12 @@
 #define IQS5XX_BOTTOM_BETA 0x0637
 #define IQS5XX_STATIONARY_THRESH 0x0672
 
+// Trackpad resolution (max coordinate), 2 bytes each. Higher values give the
+// chip finer internal tracking -> smoother slow movement (less "staircase") and
+// higher effective sensitivity; compensate speed with an input-processor scaler.
+#define IQS5XX_X_RESOLUTION 0x066E
+#define IQS5XX_Y_RESOLUTION 0x0670
+
 #define IQS5XX_END_COMM_WINDOW 0xEEEE
 
 // Active mode report rate, in ms (2 bytes wide). Lower = faster/smoother.
@@ -141,6 +147,10 @@ struct iqs5xx_config {
 
     // Active mode report rate in ms (0 keeps the chip default).
     uint16_t active_report_rate;
+
+    // Trackpad resolution / max coordinate (0 keeps the chip default).
+    uint16_t x_resolution;
+    uint16_t y_resolution;
 };
 
 struct iqs5xx_data {

@@ -225,6 +225,23 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
+    // Optionally raise the trackpad resolution for finer, smoother tracking.
+    if (config->x_resolution != 0) {
+        ret = iqs5xx_write_reg16(dev, IQS5XX_X_RESOLUTION, config->x_resolution);
+        if (ret < 0) {
+            LOG_ERR("Failed to set X resolution: %d", ret);
+            return ret;
+        }
+    }
+
+    if (config->y_resolution != 0) {
+        ret = iqs5xx_write_reg16(dev, IQS5XX_Y_RESOLUTION, config->y_resolution);
+        if (ret < 0) {
+            LOG_ERR("Failed to set Y resolution: %d", ret);
+            return ret;
+        }
+    }
+
     // TODO: Expose these through dts bindings.
     // Set filter settings with:
     // - IIR filter enabled
@@ -409,6 +426,8 @@ static int iqs5xx_init(const struct device *dev) {
         .bottom_beta = DT_INST_PROP_OR(n, bottom_beta, 5),                                         \
         .stationary_threshold = DT_INST_PROP_OR(n, stationary_threshold, 5),                       \
         .active_report_rate = DT_INST_PROP_OR(n, active_report_rate, 0),                           \
+        .x_resolution = DT_INST_PROP_OR(n, x_resolution, 0),                                       \
+        .y_resolution = DT_INST_PROP_OR(n, y_resolution, 0),                                       \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, iqs5xx_init, NULL, &iqs5xx_data_##n, &iqs5xx_config_##n, POST_KERNEL, \
                           CONFIG_INPUT_INIT_PRIORITY, NULL);
