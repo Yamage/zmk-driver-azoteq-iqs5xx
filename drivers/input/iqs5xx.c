@@ -18,33 +18,11 @@
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
-static int iqs5xx_read_reg16(const struct device *dev, uint16_t reg, uint16_t *val) {
-    const struct iqs5xx_config *config = dev->config;
-    uint8_t buf[2];
-    uint8_t reg_buf[2] = {reg >> 8, reg & 0xFF};
-    int ret;
-
-    ret = i2c_write_read_dt(&config->i2c, reg_buf, sizeof(reg_buf), buf, sizeof(buf));
-    if (ret < 0) {
-        return ret;
-    }
-
-    *val = (buf[0] << 8) | buf[1];
-    return 0;
-}
-
 static int iqs5xx_write_reg16(const struct device *dev, uint16_t reg, uint16_t val) {
     const struct iqs5xx_config *config = dev->config;
     uint8_t buf[4] = {reg >> 8, reg & 0xFF, val >> 8, val & 0xFF};
 
     return i2c_write_dt(&config->i2c, buf, sizeof(buf));
-}
-
-static int iqs5xx_read_reg8(const struct device *dev, uint16_t reg, uint8_t *val) {
-    const struct iqs5xx_config *config = dev->config;
-    uint8_t reg_buf[2] = {reg >> 8, reg & 0xFF};
-
-    return i2c_write_read_dt(&config->i2c, reg_buf, sizeof(reg_buf), val, 1);
 }
 
 static int iqs5xx_write_reg8(const struct device *dev, uint16_t reg, uint8_t val) {
@@ -82,33 +60,35 @@ static void iqs5xx_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, work);
     const struct device *dev = data->dev;
     const struct iqs5xx_config *config = dev->config;
-    uint8_t sys_info_0, sys_info_1, gesture_events_0, gesture_events_1, num_fingers;
     int ret;
 
-    // Read system info registers.
-    ret = iqs5xx_read_reg8(dev, IQS5XX_SYSTEM_INFO_0, &sys_info_0);
+    /*
+     * Read the whole contiguous data block (0x000D..0x0015) in a single I2C
+     * transaction instead of one read per register. Fewer transactions keep
+     * the per-report bus time well inside the RDY comm window, which avoids
+     * dropped reports (RR_MISSED) and makes the cursor refresh smoothly.
+     *
+     * Block layout (offset from 0x000D = IQS5XX_GESTURE_EVENTS_0):
+     *   [0] gesture events 0   [1] gesture events 1
+     *   [2] system info 0      [3] system info 1
+     *   [4] number of fingers (unused)
+     *   [5..6] relative X (big-endian, int16)
+     *   [7..8] relative Y (big-endian, int16)
+     */
+    uint8_t block[9];
+    uint8_t block_reg[2] = {IQS5XX_GESTURE_EVENTS_0 >> 8, IQS5XX_GESTURE_EVENTS_0 & 0xFF};
+    ret = i2c_write_read_dt(&config->i2c, block_reg, sizeof(block_reg), block, sizeof(block));
     if (ret < 0) {
-        LOG_ERR("Failed to read system info 0: %d", ret);
+        LOG_ERR("Failed to read data block: %d", ret);
         goto end_comm;
     }
 
-    ret = iqs5xx_read_reg8(dev, IQS5XX_SYSTEM_INFO_1, &sys_info_1);
-    if (ret < 0) {
-        LOG_ERR("Failed to read system info 1: %d", ret);
-        goto end_comm;
-    }
-
-    ret = iqs5xx_read_reg8(dev, IQS5XX_GESTURE_EVENTS_0, &gesture_events_0);
-    if (ret < 0) {
-        LOG_ERR("Failed to read gesture events: %d", ret);
-        goto end_comm;
-    }
-
-    ret = iqs5xx_read_reg8(dev, IQS5XX_GESTURE_EVENTS_1, &gesture_events_1);
-    if (ret < 0) {
-        LOG_ERR("Failed to read gesture events 1: %d", ret);
-        goto end_comm;
-    }
+    uint8_t gesture_events_0 = block[0];
+    uint8_t gesture_events_1 = block[1];
+    uint8_t sys_info_0 = block[2];
+    uint8_t sys_info_1 = block[3];
+    int16_t rel_x = (int16_t)((block[5] << 8) | block[6]);
+    int16_t rel_y = (int16_t)((block[7] << 8) | block[8]);
 
     // Handle reset indication.
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
@@ -138,21 +118,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
 
     bool hold_became_active = (gesture_events_0 & IQS5XX_PRESS_AND_HOLD) && !data->active_hold;
     bool hold_released = !(gesture_events_0 & IQS5XX_PRESS_AND_HOLD) && data->active_hold;
-
-    int16_t rel_x, rel_y;
-    if (tp_movement || scroll) {
-        ret = iqs5xx_read_reg16(dev, IQS5XX_REL_X, (uint16_t *)&rel_x);
-        if (ret < 0) {
-            LOG_ERR("Failed to read relative X: %d", ret);
-            goto end_comm;
-        }
-
-        ret = iqs5xx_read_reg16(dev, IQS5XX_REL_Y, (uint16_t *)&rel_y);
-        if (ret < 0) {
-            LOG_ERR("Failed to read relative Y: %d", ret);
-            goto end_comm;
-        }
-    }
 
     // Handle movement and gestures.
     //
@@ -209,12 +174,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
             goto end_comm;
         }
     } else if (tp_movement) {
-        ret = iqs5xx_read_reg8(dev, IQS5XX_NUM_FINGERS, &num_fingers);
-        if (ret < 0) {
-            LOG_ERR("Failed to read number of fingers: %d", ret);
-            goto end_comm;
-        }
-
         if (rel_x != 0 || rel_y != 0) {
             input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
