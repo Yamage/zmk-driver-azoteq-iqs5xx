@@ -212,7 +212,13 @@ SYS_INIT(iqs5xx_inertia_settings_load, APPLICATION, CONFIG_APPLICATION_INIT_PRIO
 
 static void iqs5xx_inertia_schedule_save(struct iqs5xx_data *data) {
 #if IS_ENABLED(CONFIG_SETTINGS)
-    k_work_schedule_for_queue(&iqs5xx_work_q, &data->inertia_save_work, K_SECONDS(2));
+    // Run the flash write on the system workqueue, NOT the dedicated trackpad
+    // report queue (iqs5xx_work_q). settings_save_one() blocks while the nRF
+    // flash write is synchronised with the BLE radio and is stack-heavy; doing
+    // it on the single-threaded report queue stalls (or overflows) report
+    // processing and freezes the cursor a couple of seconds after an inertia
+    // control is used.
+    k_work_schedule(&data->inertia_save_work, K_SECONDS(2));
 #else
     ARG_UNUSED(data);
 #endif
