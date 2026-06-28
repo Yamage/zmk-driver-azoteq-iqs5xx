@@ -67,6 +67,78 @@ static void iqs5xx_button_release_work_handler(struct k_work *work) {
     }
 }
 
+/*
+ * Inertia / glide handler.
+ *
+ * After the finger is lifted, this replays the last measured velocity as a
+ * stream of synthetic relative reports, decaying it by a friction factor every
+ * tick until it dies out (trackball-like spin). The RDY interrupt does not fire
+ * once the finger is gone, so this self-reschedules on the trackpad workqueue.
+ * A fresh touch cancels it from iqs5xx_work_handler() for an instant stop.
+ */
+static void iqs5xx_inertia_work_handler(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, inertia_work);
+    const struct device *dev = data->dev;
+    const struct iqs5xx_config *config = dev->config;
+
+    if (data->glide_mode == IQS5XX_GLIDE_CURSOR) {
+        data->glide_x_acc += data->vel_x;
+        data->glide_y_acc += data->vel_y;
+        int32_t out_x = data->glide_x_acc >> 8;
+        int32_t out_y = data->glide_y_acc >> 8;
+        data->glide_x_acc -= out_x << 8;
+        data->glide_y_acc -= out_y << 8;
+        if (out_x != 0 || out_y != 0) {
+            input_report_rel(dev, INPUT_REL_X, out_x, false, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_Y, out_y, true, K_FOREVER);
+        }
+    } else if (data->glide_mode == IQS5XX_GLIDE_SCROLL) {
+        const int16_t scroll_div = 32;
+        data->glide_x_acc += data->vel_x;
+        data->glide_y_acc += data->vel_y;
+        int32_t step_x = data->glide_x_acc >> 8;
+        int32_t step_y = data->glide_y_acc >> 8;
+        data->glide_x_acc -= step_x << 8;
+        data->glide_y_acc -= step_y << 8;
+        if (step_x != 0) {
+            data->scroll_x_acc += step_x;
+            if (abs(data->scroll_x_acc) >= scroll_div) {
+                input_report_rel(dev, INPUT_REL_HWHEEL, data->scroll_x_acc / scroll_div, true,
+                                 K_FOREVER);
+                data->scroll_x_acc %= scroll_div;
+            }
+        }
+        if (step_y != 0) {
+            data->scroll_y_acc += step_y;
+            if (abs(data->scroll_y_acc) >= scroll_div) {
+                input_report_rel(dev, INPUT_REL_WHEEL, data->scroll_y_acc / scroll_div, true,
+                                 K_FOREVER);
+                data->scroll_y_acc %= scroll_div;
+            }
+        }
+    } else {
+        return;
+    }
+
+    // Decay the velocity by the friction factor (retained/256 per tick).
+    data->vel_x = (data->vel_x * (int32_t)config->inertia_friction) >> 8;
+    data->vel_y = (data->vel_y * (int32_t)config->inertia_friction) >> 8;
+
+    // Stop once the speed falls below ~1 count/tick on both axes.
+    if (abs(data->vel_x) < (1 << 8) && abs(data->vel_y) < (1 << 8)) {
+        data->glide_mode = IQS5XX_GLIDE_NONE;
+        data->vel_x = 0;
+        data->vel_y = 0;
+        data->glide_x_acc = 0;
+        data->glide_y_acc = 0;
+        return;
+    }
+
+    k_work_schedule_for_queue(&iqs5xx_work_q, &data->inertia_work,
+                              K_MSEC(config->inertia_tick_ms));
+}
+
 static void iqs5xx_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, work);
     const struct device *dev = data->dev;
@@ -117,6 +189,36 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->scroll_y_acc = 0;
     }
 
+    // Touch/release edge detection for the inertia glide.
+    uint8_t fingers = block[4];
+    if (fingers > 0 && data->last_fingers == 0) {
+        // A new touch instantly stops any ongoing glide.
+        k_work_cancel_delayable(&data->inertia_work);
+        data->glide_mode = IQS5XX_GLIDE_NONE;
+        data->vel_x = 0;
+        data->vel_y = 0;
+        data->glide_x_acc = 0;
+        data->glide_y_acc = 0;
+        data->scroll_x_acc = 0;
+        data->scroll_y_acc = 0;
+    } else if (fingers == 0 && data->last_fingers > 0) {
+        // The finger was lifted: start gliding if the release was fast enough.
+        bool enabled = (data->glide_mode == IQS5XX_GLIDE_CURSOR && config->inertia_cursor) ||
+                       (data->glide_mode == IQS5XX_GLIDE_SCROLL && config->inertia_scroll);
+        int32_t min_q8 = (int32_t)config->inertia_min_speed << 8;
+        if (enabled && (abs(data->vel_x) >= min_q8 || abs(data->vel_y) >= min_q8)) {
+            data->glide_x_acc = 0;
+            data->glide_y_acc = 0;
+            k_work_schedule_for_queue(&iqs5xx_work_q, &data->inertia_work,
+                                      K_MSEC(config->inertia_tick_ms));
+        } else {
+            data->glide_mode = IQS5XX_GLIDE_NONE;
+            data->vel_x = 0;
+            data->vel_y = 0;
+        }
+    }
+    data->last_fingers = fingers;
+
     uint16_t button_code;
     bool button_pressed = false;
     if (gesture_events_0 & IQS5XX_SINGLE_TAP) {
@@ -138,10 +240,18 @@ static void iqs5xx_work_handler(struct k_work *work) {
         LOG_INF("Hold became active");
         input_report_key(dev, LEFT_BUTTON_CODE, 1, true, K_FOREVER);
         data->active_hold = true;
+        // Suppress inertia during a press-and-hold drag.
+        data->glide_mode = IQS5XX_GLIDE_NONE;
+        data->vel_x = 0;
+        data->vel_y = 0;
     } else if (hold_released) {
         LOG_INF("Hold became inactive");
         input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
         data->active_hold = false;
+        // Do not fling the cursor when a drag ends.
+        data->glide_mode = IQS5XX_GLIDE_NONE;
+        data->vel_x = 0;
+        data->vel_y = 0;
     } else if (button_pressed) {
         // Cancel any pending release.
         k_work_cancel_delayable(&data->button_release_work);
@@ -169,6 +279,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
                                 K_FOREVER);
                 data->scroll_x_acc %= scroll_div;
             }
+            // Track velocity for scroll inertia (sign already normalised above).
+            data->vel_x = (data->vel_x * 3 + ((int32_t)rel_x << 8)) >> 2;
+            data->vel_y = (data->vel_y * 3) >> 2;
+            data->glide_mode = IQS5XX_GLIDE_SCROLL;
             goto end_comm;
         }
         if (rel_y != 0) {
@@ -182,6 +296,9 @@ static void iqs5xx_work_handler(struct k_work *work) {
                 data->scroll_y_acc %= scroll_div;
             }
 
+            data->vel_y = (data->vel_y * 3 + ((int32_t)rel_y << 8)) >> 2;
+            data->vel_x = (data->vel_x * 3) >> 2;
+            data->glide_mode = IQS5XX_GLIDE_SCROLL;
             goto end_comm;
         }
     } else if (tp_movement) {
@@ -189,6 +306,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
             input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
         }
+        // Track velocity for cursor inertia.
+        data->vel_x = (data->vel_x * 3 + ((int32_t)rel_x << 8)) >> 2;
+        data->vel_y = (data->vel_y * 3 + ((int32_t)rel_y << 8)) >> 2;
+        data->glide_mode = IQS5XX_GLIDE_CURSOR;
     }
 
 end_comm:
@@ -334,6 +455,7 @@ static int iqs5xx_init(const struct device *dev) {
     data->dev = dev;
     k_work_init(&data->work, iqs5xx_work_handler);
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
+    k_work_init_delayable(&data->inertia_work, iqs5xx_inertia_work_handler);
 
     // Start the dedicated report workqueue once (shared across instances).
     if (!iqs5xx_work_q_started) {
@@ -449,6 +571,11 @@ static int iqs5xx_init(const struct device *dev) {
         .active_report_rate = DT_INST_PROP_OR(n, active_report_rate, 0),                           \
         .x_resolution = DT_INST_PROP_OR(n, x_resolution, 0),                                       \
         .y_resolution = DT_INST_PROP_OR(n, y_resolution, 0),                                       \
+        .inertia_cursor = DT_INST_PROP(n, inertia_cursor),                                         \
+        .inertia_scroll = DT_INST_PROP(n, inertia_scroll),                                         \
+        .inertia_friction = DT_INST_PROP_OR(n, inertia_friction, 242),                             \
+        .inertia_min_speed = DT_INST_PROP_OR(n, inertia_min_speed, 2),                             \
+        .inertia_tick_ms = DT_INST_PROP_OR(n, inertia_tick_ms, 8),                                 \
     };                                                                                             \
     DEVICE_DT_INST_DEFINE(n, iqs5xx_init, NULL, &iqs5xx_data_##n, &iqs5xx_config_##n, POST_KERNEL, \
                           CONFIG_INPUT_INIT_PRIORITY, NULL);

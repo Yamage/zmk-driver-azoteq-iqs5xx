@@ -85,3 +85,36 @@ properties:
       Trackpad Y resolution (max coordinate). See x-resolution. 0 keeps the
       chip default.
     default: 0
+
+  inertia-cursor:
+    type: boolean
+    description: |
+      Enable trackball-like inertia for cursor movement: when the finger is
+      lifted the cursor keeps moving at the release velocity and decays with
+      friction. Touching the pad again stops it instantly.
+
+  inertia-scroll:
+    type: boolean
+    description: |
+      Enable inertia for scrolling (flick scroll): a two-finger scroll keeps
+      coasting after the fingers are lifted, decaying with friction.
+
+  inertia-friction:
+    type: int
+    description: |
+      Fraction of the velocity retained each glide tick, out of 256. Larger =
+      longer glide (less friction). 242 ~= 0.945 gives roughly a 0.6 s glide.
+    default: 242
+
+  inertia-min-speed:
+    type: int
+    description: |
+      Minimum release speed (in counts per report) required to start a glide.
+      Slower lifts stop immediately, preventing drift.
+    default: 2
+
+  inertia-tick-ms:
+    type: int
+    description: |
+      Interval in ms between synthetic glide reports while coasting.
+    default: 8

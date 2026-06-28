@@ -151,7 +151,19 @@ struct iqs5xx_config {
     // Trackpad resolution / max coordinate (0 keeps the chip default).
     uint16_t x_resolution;
     uint16_t y_resolution;
+
+    // Cursor/scroll inertia (trackball-like glide after the finger is lifted).
+    bool inertia_cursor;       // Enable glide for cursor movement.
+    bool inertia_scroll;       // Enable glide for scrolling (flick scroll).
+    uint16_t inertia_friction; // Velocity retained per tick, out of 256 (242 ~= 0.945).
+    uint16_t inertia_min_speed; // Min release speed (counts/report) to start a glide.
+    uint16_t inertia_tick_ms;  // Glide timer cadence in ms.
 };
+
+// Inertia/glide mode: which kind of motion the post-release glide replays.
+#define IQS5XX_GLIDE_NONE 0
+#define IQS5XX_GLIDE_CURSOR 1
+#define IQS5XX_GLIDE_SCROLL 2
 
 struct iqs5xx_data {
     const struct device *dev;
@@ -166,4 +178,13 @@ struct iqs5xx_data {
     // Scroll accumulators.
     int16_t scroll_x_acc;
     int16_t scroll_y_acc;
+
+    // Inertia / glide state.
+    struct k_work_delayable inertia_work;
+    int32_t vel_x;       // Q8 fixed-point velocity estimate (counts/report).
+    int32_t vel_y;
+    int32_t glide_x_acc; // Q8 fractional carry for emitted glide movement.
+    int32_t glide_y_acc;
+    uint8_t glide_mode;  // IQS5XX_GLIDE_* : last motion kind, used while gliding.
+    uint8_t last_fingers; // Finger count from the previous report (touch/release edge).
 };
