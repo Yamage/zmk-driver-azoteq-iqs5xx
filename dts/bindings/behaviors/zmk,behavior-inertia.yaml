@@ -1,0 +1,8 @@
+# Copyright (c) 2024 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+description: Trackpad inertia (glide) runtime control behavior
+
+compatible: "zmk,behavior-inertia"
+
+include: one_param.yaml

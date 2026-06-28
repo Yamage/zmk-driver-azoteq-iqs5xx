@@ -187,4 +187,11 @@ struct iqs5xx_data {
     int32_t glide_y_acc;
     uint8_t glide_mode;  // IQS5XX_GLIDE_* : last motion kind, used while gliding.
     uint8_t last_fingers; // Finger count from the previous report (touch/release edge).
+
+    // Runtime-tunable inertia parameters (initialised from the devicetree
+    // defaults, then overridden by saved settings and the keymap controls).
+    bool inertia_enabled;          // Master on/off, toggled from the keymap.
+    uint16_t inertia_friction_rt;  // Live friction (retained/256 per tick).
+    uint16_t inertia_min_speed_rt; // Live min release speed (counts/report).
+    struct k_work_delayable inertia_save_work; // Debounced settings save.
 };

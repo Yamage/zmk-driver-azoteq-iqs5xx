@@ -1,0 +1,5 @@
+config ZMK_BEHAVIOR_INERTIA
+    bool "Trackpad inertia runtime control behavior"
+    default y
+    depends on DT_HAS_ZMK_BEHAVIOR_INERTIA_ENABLED
+    depends on INPUT_AZOTEQ_IQS5XX

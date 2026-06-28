@@ -13,10 +13,27 @@
 #include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/init.h>
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+#include <zephyr/settings/settings.h>
+#endif
 
 #include "iqs5xx.h"
+#include <iqs5xx_inertia.h>
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
+
+// Bounds for the runtime-tunable inertia parameters.
+#define IQS5XX_FRICTION_MIN 160
+#define IQS5XX_FRICTION_MAX 252
+#define IQS5XX_MIN_SPEED_MIN 0
+#define IQS5XX_MIN_SPEED_MAX 60
+
+// Single trackpad instance, captured at init so the keymap behavior and the
+// settings handler can reach the runtime inertia state.
+static struct iqs5xx_data *iqs5xx_inertia_data;
+static const struct iqs5xx_config *iqs5xx_inertia_config;
 
 /*
  * Dedicated workqueue for servicing trackpad reports. Keeping report processing
@@ -122,8 +139,8 @@ static void iqs5xx_inertia_work_handler(struct k_work *work) {
     }
 
     // Decay the velocity by the friction factor (retained/256 per tick).
-    data->vel_x = (data->vel_x * (int32_t)config->inertia_friction) >> 8;
-    data->vel_y = (data->vel_y * (int32_t)config->inertia_friction) >> 8;
+    data->vel_x = (data->vel_x * (int32_t)data->inertia_friction_rt) >> 8;
+    data->vel_y = (data->vel_y * (int32_t)data->inertia_friction_rt) >> 8;
 
     // Stop once the speed falls below ~1 count/tick on both axes.
     if (abs(data->vel_x) < (1 << 8) && abs(data->vel_y) < (1 << 8)) {
@@ -137,6 +154,114 @@ static void iqs5xx_inertia_work_handler(struct k_work *work) {
 
     k_work_schedule_for_queue(&iqs5xx_work_q, &data->inertia_work,
                               K_MSEC(config->inertia_tick_ms));
+}
+
+/* ---- Runtime inertia control + flash persistence ---- */
+
+#if IS_ENABLED(CONFIG_SETTINGS)
+struct iqs5xx_inertia_persist {
+    uint8_t enabled;
+    uint16_t friction;
+    uint16_t min_speed;
+};
+
+static void iqs5xx_inertia_save_work_handler(struct k_work *work) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    struct iqs5xx_inertia_persist p = {
+        .enabled = data->inertia_enabled ? 1 : 0,
+        .friction = data->inertia_friction_rt,
+        .min_speed = data->inertia_min_speed_rt,
+    };
+    int rc = settings_save_one("iqs5xx_inertia/state", &p, sizeof(p));
+    if (rc) {
+        LOG_WRN("Failed to save inertia settings: %d", rc);
+    }
+}
+
+static int iqs5xx_inertia_settings_set(const char *name, size_t len, settings_read_cb read_cb,
+                                       void *cb_arg) {
+    if (!settings_name_steq(name, "state", NULL)) {
+        return -ENOENT;
+    }
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    struct iqs5xx_inertia_persist p;
+    if (len != sizeof(p) || data == NULL) {
+        return -EINVAL;
+    }
+    int rc = read_cb(cb_arg, &p, sizeof(p));
+    if (rc < 0) {
+        return rc;
+    }
+    data->inertia_enabled = p.enabled != 0;
+    data->inertia_friction_rt = CLAMP(p.friction, IQS5XX_FRICTION_MIN, IQS5XX_FRICTION_MAX);
+    data->inertia_min_speed_rt = CLAMP(p.min_speed, IQS5XX_MIN_SPEED_MIN, IQS5XX_MIN_SPEED_MAX);
+    return 0;
+}
+
+SETTINGS_STATIC_HANDLER_DEFINE(iqs5xx_inertia, "iqs5xx_inertia", NULL,
+                               iqs5xx_inertia_settings_set, NULL, NULL);
+
+static int iqs5xx_inertia_settings_load(void) {
+    return settings_load_subtree("iqs5xx_inertia");
+}
+SYS_INIT(iqs5xx_inertia_settings_load, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+#endif // CONFIG_SETTINGS
+
+static void iqs5xx_inertia_schedule_save(struct iqs5xx_data *data) {
+#if IS_ENABLED(CONFIG_SETTINGS)
+    k_work_schedule_for_queue(&iqs5xx_work_q, &data->inertia_save_work, K_SECONDS(2));
+#else
+    ARG_UNUSED(data);
+#endif
+}
+
+void iqs5xx_inertia_toggle(void) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    data->inertia_enabled = !data->inertia_enabled;
+    LOG_INF("Inertia %s", data->inertia_enabled ? "on" : "off");
+    iqs5xx_inertia_schedule_save(data);
+}
+
+void iqs5xx_inertia_adjust_friction(int delta) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    int v = CLAMP((int)data->inertia_friction_rt + delta, IQS5XX_FRICTION_MIN, IQS5XX_FRICTION_MAX);
+    data->inertia_friction_rt = (uint16_t)v;
+    LOG_INF("Inertia friction %d", v);
+    iqs5xx_inertia_schedule_save(data);
+}
+
+void iqs5xx_inertia_adjust_min_speed(int delta) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    int v =
+        CLAMP((int)data->inertia_min_speed_rt + delta, IQS5XX_MIN_SPEED_MIN, IQS5XX_MIN_SPEED_MAX);
+    data->inertia_min_speed_rt = (uint16_t)v;
+    LOG_INF("Inertia min-speed %d", v);
+    iqs5xx_inertia_schedule_save(data);
+}
+
+void iqs5xx_inertia_reset(void) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    const struct iqs5xx_config *config = iqs5xx_inertia_config;
+    if (data == NULL || config == NULL) {
+        return;
+    }
+    data->inertia_enabled = config->inertia_cursor || config->inertia_scroll;
+    data->inertia_friction_rt = config->inertia_friction;
+    data->inertia_min_speed_rt = config->inertia_min_speed;
+    LOG_INF("Inertia reset to defaults");
+    iqs5xx_inertia_schedule_save(data);
 }
 
 static void iqs5xx_work_handler(struct k_work *work) {
@@ -203,9 +328,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->scroll_y_acc = 0;
     } else if (fingers == 0 && data->last_fingers > 0) {
         // The finger was lifted: start gliding if the release was fast enough.
-        bool enabled = (data->glide_mode == IQS5XX_GLIDE_CURSOR && config->inertia_cursor) ||
-                       (data->glide_mode == IQS5XX_GLIDE_SCROLL && config->inertia_scroll);
-        int32_t min_q8 = (int32_t)config->inertia_min_speed << 8;
+        bool enabled = data->inertia_enabled &&
+                       ((data->glide_mode == IQS5XX_GLIDE_CURSOR && config->inertia_cursor) ||
+                        (data->glide_mode == IQS5XX_GLIDE_SCROLL && config->inertia_scroll));
+        int32_t min_q8 = (int32_t)data->inertia_min_speed_rt << 8;
         if (enabled && (abs(data->vel_x) >= min_q8 || abs(data->vel_y) >= min_q8)) {
             data->glide_x_acc = 0;
             data->glide_y_acc = 0;
@@ -456,6 +582,17 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init(&data->work, iqs5xx_work_handler);
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
     k_work_init_delayable(&data->inertia_work, iqs5xx_inertia_work_handler);
+
+    // Seed the runtime inertia parameters from the devicetree defaults; saved
+    // settings (if any) override these at the APPLICATION init phase.
+    iqs5xx_inertia_data = data;
+    iqs5xx_inertia_config = config;
+    data->inertia_enabled = config->inertia_cursor || config->inertia_scroll;
+    data->inertia_friction_rt = config->inertia_friction;
+    data->inertia_min_speed_rt = config->inertia_min_speed;
+#if IS_ENABLED(CONFIG_SETTINGS)
+    k_work_init_delayable(&data->inertia_save_work, iqs5xx_inertia_save_work_handler);
+#endif
 
     // Start the dedicated report workqueue once (shared across instances).
     if (!iqs5xx_work_q_started) {
