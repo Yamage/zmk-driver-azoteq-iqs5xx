@@ -96,6 +96,9 @@
 #define IQS5XX_HOLD_TIME 0x06BD
 // TODO: Make hold time configurable with KConfig.
 
+// Max movement (in resolution units, 2 registers wide) for a touch to count as a tap.
+#define IQS5XX_TAP_DISTANCE 0x06BB
+
 // Mouse button helpers.
 #define LEFT_BUTTON_BIT BIT(0)
 #define RIGHT_BUTTON_BIT BIT(1)
@@ -130,6 +133,7 @@ struct iqs5xx_config {
     bool press_and_hold;
     bool two_finger_tap;
     uint16_t press_and_hold_time;
+    uint16_t tap_distance; // 0 keeps the chip default.
 
     // Scrolling configuration.
     bool scroll;

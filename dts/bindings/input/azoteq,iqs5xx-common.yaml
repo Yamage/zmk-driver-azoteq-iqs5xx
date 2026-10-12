@@ -20,6 +20,14 @@ properties:
     description: "Time in ms (in addition to the tap time) it takes to register a press and hold gesture"
     default: 250
 
+  tap-distance:
+    type: int
+    description: |
+      Max finger movement (in resolution units) for a touch to still count as a
+      tap. Raise it if taps right after moving the cursor are missed. 0 keeps
+      the chip's current setting.
+    default: 0
+
   two-finger-tap:
     type: boolean
     description: "Register two finger tap gestures and report them as a right click"

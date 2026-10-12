@@ -545,6 +545,14 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
+    if (config->tap_distance != 0) {
+        ret = iqs5xx_write_reg16(dev, IQS5XX_TAP_DISTANCE, config->tap_distance);
+        if (ret < 0) {
+            LOG_ERR("Failed to configure the tap distance: %d", ret);
+            return ret;
+        }
+    }
+
     uint8_t two_finger_gestures = 0;
     two_finger_gestures |= config->two_finger_tap ? IQS5XX_TWO_FINGER_TAP : 0;
     two_finger_gestures |= config->scroll ? IQS5XX_SCROLL : 0;
@@ -721,6 +729,7 @@ static int iqs5xx_init(const struct device *dev) {
         .natural_scroll_x = DT_INST_PROP(n, natural_scroll_x),                                     \
         .natural_scroll_y = DT_INST_PROP(n, natural_scroll_y),                                     \
         .press_and_hold_time = DT_INST_PROP_OR(n, press_and_hold_time, 250),                       \
+        .tap_distance = DT_INST_PROP_OR(n, tap_distance, 0),                                       \
         .switch_xy = DT_INST_PROP(n, switch_xy),                                                   \
         .flip_x = DT_INST_PROP(n, flip_x),                                                         \
         .flip_y = DT_INST_PROP(n, flip_y),                                                         \
