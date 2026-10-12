@@ -152,6 +152,9 @@ struct iqs5xx_config {
     uint16_t x_resolution;
     uint16_t y_resolution;
 
+    // Cursor rotation in degrees (positive = clockwise on screen, 0 = off).
+    int16_t rotation_deg;
+
     // Cursor/scroll inertia (trackball-like glide after the finger is lifted).
     bool inertia_cursor;       // Enable glide for cursor movement.
     bool inertia_scroll;       // Enable glide for scrolling (flick scroll).
@@ -187,6 +190,12 @@ struct iqs5xx_data {
     int32_t glide_y_acc;
     uint8_t glide_mode;  // IQS5XX_GLIDE_* : last motion kind, used while gliding.
     uint8_t last_fingers; // Finger count from the previous report (touch/release edge).
+
+    // Cursor rotation: Q14 cos/sin of rotation_deg and Q14 fractional carry.
+    int32_t rot_cos_q14;
+    int32_t rot_sin_q14;
+    int32_t rot_x_acc;
+    int32_t rot_y_acc;
 
     // Runtime-tunable inertia parameters (initialised from the devicetree
     // defaults, then overridden by saved settings and the keymap controls).

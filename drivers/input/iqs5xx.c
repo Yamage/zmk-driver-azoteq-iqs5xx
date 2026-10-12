@@ -6,6 +6,7 @@
 #define DT_DRV_COMPAT azoteq_iqs5xx
 
 #include <stdlib.h>
+#include <math.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
@@ -434,6 +435,14 @@ static void iqs5xx_work_handler(struct k_work *work) {
             goto end_comm;
         }
     } else if (tp_movement) {
+        if (config->rotation_deg != 0) {
+            data->rot_x_acc += rel_x * data->rot_cos_q14 - rel_y * data->rot_sin_q14;
+            data->rot_y_acc += rel_x * data->rot_sin_q14 + rel_y * data->rot_cos_q14;
+            rel_x = data->rot_x_acc / (1 << 14);
+            rel_y = data->rot_y_acc / (1 << 14);
+            data->rot_x_acc -= rel_x * (1 << 14);
+            data->rot_y_acc -= rel_y * (1 << 14);
+        }
         if (rel_x != 0 || rel_y != 0) {
             input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
@@ -596,6 +605,12 @@ static int iqs5xx_init(const struct device *dev) {
     data->inertia_enabled = config->inertia_cursor || config->inertia_scroll;
     data->inertia_friction_rt = config->inertia_friction;
     data->inertia_min_speed_rt = config->inertia_min_speed;
+
+    if (config->rotation_deg != 0) {
+        float rad = (float)config->rotation_deg * (3.14159265f / 180.0f);
+        data->rot_cos_q14 = (int32_t)roundf(cosf(rad) * 16384.0f);
+        data->rot_sin_q14 = (int32_t)roundf(sinf(rad) * 16384.0f);
+    }
 #if IS_ENABLED(CONFIG_SETTINGS)
     k_work_init_delayable(&data->inertia_save_work, iqs5xx_inertia_save_work_handler);
 #endif
@@ -714,6 +729,7 @@ static int iqs5xx_init(const struct device *dev) {
         .active_report_rate = DT_INST_PROP_OR(n, active_report_rate, 0),                           \
         .x_resolution = DT_INST_PROP_OR(n, x_resolution, 0),                                       \
         .y_resolution = DT_INST_PROP_OR(n, y_resolution, 0),                                       \
+        .rotation_deg = (int16_t)DT_INST_PROP_OR(n, rotation_deg, 0),                              \
         .inertia_cursor = DT_INST_PROP(n, inertia_cursor),                                         \
         .inertia_scroll = DT_INST_PROP(n, inertia_scroll),                                         \
         .inertia_friction = DT_INST_PROP_OR(n, inertia_friction, 242),                             \

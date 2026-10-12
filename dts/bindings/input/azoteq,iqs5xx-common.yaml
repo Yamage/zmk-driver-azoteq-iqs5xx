@@ -86,6 +86,15 @@ properties:
       chip default.
     default: 0
 
+  rotation-deg:
+    type: int
+    description: |
+      Rotate cursor movement by this many degrees (any angle). Positive turns
+      the motion clockwise on screen; write negative values as <(-45)>.
+      Applied after switch-xy / flip-x / flip-y; two-finger scroll is not
+      rotated. 0 disables rotation.
+    default: 0
+
   inertia-cursor:
     type: boolean
     description: |
