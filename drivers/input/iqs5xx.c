@@ -79,7 +79,6 @@ static void iqs5xx_button_release_work_handler(struct k_work *work) {
         if (data->buttons_pressed & BIT(i)) {
             input_report_key(data->dev, INPUT_BTN_0 + i, 0, true, K_FOREVER);
             // Turn off the bit.
-            // NOTE: This is a potential race.
             data->buttons_pressed &= ~BIT(i);
         }
     }
@@ -389,12 +388,18 @@ static void iqs5xx_work_handler(struct k_work *work) {
         // Cancel any pending release.
         k_work_cancel_delayable(&data->button_release_work);
 
+        // ZMK counts presses per button; a second press without a release leaves it stuck down.
+        uint8_t button_bit = BIT(button_code - INPUT_BTN_0);
+        if (data->buttons_pressed & button_bit) {
+            input_report_key(dev, button_code, 0, true, K_FOREVER);
+        }
+
         // Press the button immediately.
         input_report_key(dev, button_code, 1, true, K_FOREVER);
-        data->buttons_pressed |= BIT(button_code - INPUT_BTN_0);
+        data->buttons_pressed |= button_bit;
 
-        // Schedule release after 100ms.
-        k_work_schedule(&data->button_release_work, K_MSEC(100));
+        // Same queue as this handler, so the release can never run concurrently with a new press.
+        k_work_schedule_for_queue(&iqs5xx_work_q, &data->button_release_work, K_MSEC(100));
     } else if (scroll) {
         // TODO: Expose this divisor.
         int16_t scroll_div = 32;
