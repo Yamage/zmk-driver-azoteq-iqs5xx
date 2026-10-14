@@ -332,6 +332,27 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->glide_y_acc = 0;
         data->scroll_x_acc = 0;
         data->scroll_y_acc = 0;
+
+        data->drag_ignore_tap = false;
+        if (data->tap_drag_armed &&
+            k_uptime_get() - data->last_tap_ms <= IQS5XX_TAP_DRAG_WINDOW_MS) {
+            // The first tap's click may still be held for its 100 ms; end it so the drag is a new press.
+            if (data->buttons_pressed & LEFT_BUTTON_BIT) {
+                input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
+                data->buttons_pressed &= ~LEFT_BUTTON_BIT;
+            }
+            input_report_key(dev, LEFT_BUTTON_CODE, 1, true, K_FOREVER);
+            data->drag_active = true;
+        }
+        data->tap_drag_armed = false;
+    } else if (fingers == 0 && data->last_fingers > 0 && data->drag_active) {
+        input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
+        data->drag_active = false;
+        data->drag_ignore_tap = true;
+        // Do not fling the cursor when a drag ends.
+        data->glide_mode = IQS5XX_GLIDE_NONE;
+        data->vel_x = 0;
+        data->vel_y = 0;
     } else if (fingers == 0 && data->last_fingers > 0) {
         // The finger was lifted: start gliding if the release was fast enough.
         bool enabled = data->inertia_enabled &&
@@ -354,7 +375,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
     uint16_t button_code;
     bool button_pressed = false;
     if (gesture_events_0 & IQS5XX_SINGLE_TAP) {
-        button_pressed = true;
+        button_pressed = !data->drag_ignore_tap;
         button_code = INPUT_BTN_0;
     } else if (gesture_events_1 & IQS5XX_TWO_FINGER_TAP) {
         button_pressed = true;
@@ -400,6 +421,11 @@ static void iqs5xx_work_handler(struct k_work *work) {
 
         // Same queue as this handler, so the release can never run concurrently with a new press.
         k_work_schedule_for_queue(&iqs5xx_work_q, &data->button_release_work, K_MSEC(100));
+
+        if (button_code == INPUT_BTN_0 && config->tap_and_drag) {
+            data->tap_drag_armed = true;
+            data->last_tap_ms = k_uptime_get();
+        }
     } else if (scroll) {
         // TODO: Expose this divisor.
         int16_t scroll_div = 32;
@@ -734,6 +760,7 @@ static int iqs5xx_init(const struct device *dev) {
         .natural_scroll_x = DT_INST_PROP(n, natural_scroll_x),                                     \
         .natural_scroll_y = DT_INST_PROP(n, natural_scroll_y),                                     \
         .press_and_hold_time = DT_INST_PROP_OR(n, press_and_hold_time, 250),                       \
+        .tap_and_drag = DT_INST_PROP(n, tap_and_drag),                                             \
         .tap_distance = DT_INST_PROP_OR(n, tap_distance, 0),                                       \
         .switch_xy = DT_INST_PROP(n, switch_xy),                                                   \
         .flip_x = DT_INST_PROP(n, flip_x),                                                         \

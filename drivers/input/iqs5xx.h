@@ -99,6 +99,9 @@
 // Max movement (in resolution units, 2 registers wide) for a touch to count as a tap.
 #define IQS5XX_TAP_DISTANCE 0x06BB
 
+// Max gap between a tap and the next touch for that touch to start a tap-and-drag.
+#define IQS5XX_TAP_DRAG_WINDOW_MS 250
+
 // Mouse button helpers.
 #define LEFT_BUTTON_BIT BIT(0)
 #define RIGHT_BUTTON_BIT BIT(1)
@@ -134,6 +137,7 @@ struct iqs5xx_config {
     bool two_finger_tap;
     uint16_t press_and_hold_time;
     uint16_t tap_distance; // 0 keeps the chip default.
+    bool tap_and_drag;     // Tap, then touch again and hold = left-button drag.
 
     // Scrolling configuration.
     bool scroll;
@@ -194,6 +198,12 @@ struct iqs5xx_data {
     int32_t glide_y_acc;
     uint8_t glide_mode;  // IQS5XX_GLIDE_* : last motion kind, used while gliding.
     uint8_t last_fingers; // Finger count from the previous report (touch/release edge).
+
+    // Tap-and-drag state.
+    bool tap_drag_armed;  // A single tap happened; the next touch may start a drag.
+    int64_t last_tap_ms;  // Uptime of that tap.
+    bool drag_active;     // Left button is held by a tap-and-drag.
+    bool drag_ignore_tap; // Drop the tap the chip may report for the lift that ended a drag.
 
     // Cursor rotation: Q14 cos/sin of rotation_deg and Q14 fractional carry.
     int32_t rot_cos_q14;

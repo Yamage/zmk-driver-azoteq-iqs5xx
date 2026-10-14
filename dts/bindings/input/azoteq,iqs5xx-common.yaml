@@ -28,6 +28,13 @@ properties:
       the chip's current setting.
     default: 0
 
+  tap-and-drag:
+    type: boolean
+    description: |
+      Tap, then touch again within 250 ms and keep the finger down: the left
+      button stays held until the finger is lifted (drag). A quick second tap
+      becomes a double click. Needs one-finger-tap.
+
   two-finger-tap:
     type: boolean
     description: "Register two finger tap gestures and report them as a right click"
