@@ -99,6 +99,9 @@
 // Max movement (in resolution units, 2 registers wide) for a touch to count as a tap.
 #define IQS5XX_TAP_DISTANCE 0x06BB
 
+// Touch threshold = reference * (1 + multiplier / 128); set at 0x0596, clear at 0x0597 (1 byte each).
+#define IQS5XX_GLOBAL_TOUCH_SET 0x0596
+
 // Max gap between a tap and the next touch for that touch to start a tap-and-drag.
 #define IQS5XX_TAP_DRAG_WINDOW_MS 250
 
@@ -137,6 +140,7 @@ struct iqs5xx_config {
     bool two_finger_tap;
     uint16_t press_and_hold_time;
     uint16_t tap_distance; // 0 keeps the chip default.
+    uint8_t touch_threshold_increase; // Added to the module's touch set/clear multipliers.
     bool tap_and_drag;     // Tap, then touch again and hold = left-button drag.
 
     // Scrolling configuration.
@@ -204,6 +208,10 @@ struct iqs5xx_data {
     int64_t last_tap_ms;  // Uptime of that tap.
     bool drag_active;     // Left button is held by a tap-and-drag.
     bool drag_ignore_tap; // Drop the tap the chip may report for the lift that ended a drag.
+
+    // Module's original touch set/clear multipliers, read once before raising them.
+    bool touch_mult_read;
+    uint8_t touch_mult_base[2];
 
     // Cursor rotation: Q14 cos/sin of rotation_deg and Q14 fractional carry.
     int32_t rot_cos_q14;

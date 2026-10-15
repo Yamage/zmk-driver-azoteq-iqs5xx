@@ -584,6 +584,30 @@ static int iqs5xx_setup_device(const struct device *dev) {
         }
     }
 
+    if (config->touch_threshold_increase != 0) {
+        struct iqs5xx_data *data = dev->data;
+        // Read the module's own set/clear multipliers once, so a setup retry does not add twice.
+        if (!data->touch_mult_read) {
+            uint8_t reg[2] = {IQS5XX_GLOBAL_TOUCH_SET >> 8, IQS5XX_GLOBAL_TOUCH_SET & 0xFF};
+            ret = i2c_write_read_dt(&config->i2c, reg, sizeof(reg), data->touch_mult_base,
+                                    sizeof(data->touch_mult_base));
+            if (ret < 0) {
+                LOG_ERR("Failed to read the touch multipliers: %d", ret);
+                return ret;
+            }
+            data->touch_mult_read = true;
+        }
+        uint8_t set = MIN(data->touch_mult_base[0] + config->touch_threshold_increase, UINT8_MAX);
+        uint8_t clear = MIN(data->touch_mult_base[1] + config->touch_threshold_increase, UINT8_MAX);
+        LOG_INF("Touch multiplier set %u -> %u, clear %u -> %u", data->touch_mult_base[0], set,
+                data->touch_mult_base[1], clear);
+        ret = iqs5xx_write_reg16(dev, IQS5XX_GLOBAL_TOUCH_SET, ((uint16_t)set << 8) | clear);
+        if (ret < 0) {
+            LOG_ERR("Failed to set the touch multipliers: %d", ret);
+            return ret;
+        }
+    }
+
     uint8_t two_finger_gestures = 0;
     two_finger_gestures |= config->two_finger_tap ? IQS5XX_TWO_FINGER_TAP : 0;
     two_finger_gestures |= config->scroll ? IQS5XX_SCROLL : 0;
@@ -762,6 +786,7 @@ static int iqs5xx_init(const struct device *dev) {
         .press_and_hold_time = DT_INST_PROP_OR(n, press_and_hold_time, 250),                       \
         .tap_and_drag = DT_INST_PROP(n, tap_and_drag),                                             \
         .tap_distance = DT_INST_PROP_OR(n, tap_distance, 0),                                       \
+        .touch_threshold_increase = DT_INST_PROP_OR(n, touch_threshold_increase, 0),               \
         .switch_xy = DT_INST_PROP(n, switch_xy),                                                   \
         .flip_x = DT_INST_PROP(n, flip_x),                                                         \
         .flip_y = DT_INST_PROP(n, flip_y),                                                         \
