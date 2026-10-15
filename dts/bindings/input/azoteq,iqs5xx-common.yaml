@@ -31,10 +31,11 @@ properties:
   touch-threshold-increase:
     type: int
     description: |
-      Added to the module's global touch multipliers (set and clear, 0x0596/0x0597),
-      keeping their hysteresis. Threshold = reference * (1 + multiplier / 128), so
-      each +1 needs about 0.8% more signal; raise it if a hovering finger counts as
-      a touch. 0 keeps the module's setting.
+      Added to the module's global touch set multiplier (0x0596). The clear
+      multiplier (0x0597) is kept, so an established touch is not dropped more
+      easily. Threshold = reference * (1 + multiplier / 128), so each +1 needs
+      about 0.8% more signal to start a touch; raise it if a hovering finger
+      counts as a touch. 0 keeps the module's setting.
     default: 0
 
   tap-and-drag:

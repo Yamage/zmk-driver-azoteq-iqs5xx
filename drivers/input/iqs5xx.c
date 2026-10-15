@@ -653,13 +653,14 @@ static int iqs5xx_setup_device(const struct device *dev) {
             }
             data->touch_mult_read = true;
         }
+        // Raise only the set threshold: a hover never sets a touch, while keeping the module's clear
+        // threshold stops a light, slow-moving touch from flickering out.
         uint8_t set = MIN(data->touch_mult_base[0] + config->touch_threshold_increase, UINT8_MAX);
-        uint8_t clear = MIN(data->touch_mult_base[1] + config->touch_threshold_increase, UINT8_MAX);
-        LOG_INF("Touch multiplier set %u -> %u, clear %u -> %u", data->touch_mult_base[0], set,
-                data->touch_mult_base[1], clear);
-        ret = iqs5xx_write_reg16(dev, IQS5XX_GLOBAL_TOUCH_SET, ((uint16_t)set << 8) | clear);
+        LOG_INF("Touch multiplier set %u -> %u, clear %u (kept)", data->touch_mult_base[0], set,
+                data->touch_mult_base[1]);
+        ret = iqs5xx_write_reg8(dev, IQS5XX_GLOBAL_TOUCH_SET, set);
         if (ret < 0) {
-            LOG_ERR("Failed to set the touch multipliers: %d", ret);
+            LOG_ERR("Failed to set the touch multiplier: %d", ret);
             return ret;
         }
     }

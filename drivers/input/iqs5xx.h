@@ -140,7 +140,7 @@ struct iqs5xx_config {
     bool two_finger_tap;
     uint16_t press_and_hold_time;
     uint16_t tap_distance; // 0 keeps the chip default.
-    uint8_t touch_threshold_increase; // Added to the module's touch set/clear multipliers.
+    uint8_t touch_threshold_increase; // Added to the module's touch set multiplier only.
     bool tap_and_drag;     // Tap, then touch again and hold = left-button drag.
 
     // Scrolling configuration.
