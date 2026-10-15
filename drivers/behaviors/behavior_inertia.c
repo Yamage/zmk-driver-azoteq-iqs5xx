@@ -11,6 +11,8 @@
 #include <zephyr/logging/log.h>
 
 #include <zmk/behavior.h>
+#include <zmk/event_manager.h>
+#include <zmk/events/layer_state_changed.h>
 
 #include <iqs5xx_inertia.h>
 
@@ -70,3 +72,13 @@ static int behavior_inertia_init(const struct device *dev) { return 0; }
 
 BEHAVIOR_DT_INST_DEFINE(0, behavior_inertia_init, NULL, NULL, NULL, POST_KERNEL,
                         CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &behavior_inertia_driver_api);
+
+// A glide started under one layer (e.g. Scroll) must not carry on as another action
+// (cursor movement) after that layer changes.
+static int inertia_layer_state_listener(const zmk_event_t *eh) {
+    iqs5xx_inertia_stop();
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(behavior_inertia_layer, inertia_layer_state_listener);
+ZMK_SUBSCRIPTION(behavior_inertia_layer, zmk_layer_state_changed);

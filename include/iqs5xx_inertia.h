@@ -31,6 +31,9 @@ void iqs5xx_inertia_adjust_min_speed(int delta);
 // Restore enabled state, friction and min-speed to the devicetree defaults.
 void iqs5xx_inertia_reset(void);
 
+// Stop an ongoing glide immediately (no-op when not gliding).
+void iqs5xx_inertia_stop(void);
+
 #ifdef __cplusplus
 }
 #endif

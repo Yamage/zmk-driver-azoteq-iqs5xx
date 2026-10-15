@@ -173,7 +173,17 @@ struct iqs5xx_config {
     uint16_t inertia_friction; // Velocity retained per tick, out of 256 (242 ~= 0.945).
     uint16_t inertia_min_speed; // Min release speed (counts/report) to start a glide.
     uint16_t inertia_tick_ms;  // Glide timer cadence in ms.
+
+    // Pointer acceleration: gain (percent) ramps from accel_gain_min at accel_speed_low to
+    // accel_gain_max at accel_speed_high (speeds in counts/report).
+    uint16_t accel_gain_min;
+    uint16_t accel_gain_max;
+    uint16_t accel_speed_low;
+    uint16_t accel_speed_high;
 };
+
+// Chip's active report period when active-report-rate is left at 0.
+#define IQS5XX_DEFAULT_REPORT_MS 10
 
 // Inertia/glide mode: which kind of motion the post-release glide replays.
 #define IQS5XX_GLIDE_NONE 0
@@ -201,6 +211,10 @@ struct iqs5xx_data {
     int32_t glide_x_acc; // Q8 fractional carry for emitted glide movement.
     int32_t glide_y_acc;
     uint8_t glide_mode;  // IQS5XX_GLIDE_* : last motion kind, used while gliding.
+    int32_t glide_gain_q8; // Acceleration gain at release, applied to the whole glide.
+    struct k_work inertia_stop_work; // Stops a glide from outside the report queue.
+    int32_t accel_x_acc; // Q8 fractional carry for accelerated cursor output.
+    int32_t accel_y_acc;
     uint8_t last_fingers; // Finger count from the previous report (touch/release edge).
 
     // Tap-and-drag state.

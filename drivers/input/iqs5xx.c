@@ -98,10 +98,15 @@ static void iqs5xx_inertia_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, inertia_work);
     const struct device *dev = data->dev;
     const struct iqs5xx_config *config = dev->config;
+    // vel is per chip report; scale it to per glide tick so the glide starts at the release speed.
+    int32_t report_ms =
+        config->active_report_rate ? config->active_report_rate : IQS5XX_DEFAULT_REPORT_MS;
+    int32_t step_x = ((data->vel_x * data->glide_gain_q8) >> 8) * config->inertia_tick_ms / report_ms;
+    int32_t step_y = ((data->vel_y * data->glide_gain_q8) >> 8) * config->inertia_tick_ms / report_ms;
 
     if (data->glide_mode == IQS5XX_GLIDE_CURSOR) {
-        data->glide_x_acc += data->vel_x;
-        data->glide_y_acc += data->vel_y;
+        data->glide_x_acc += step_x;
+        data->glide_y_acc += step_y;
         int32_t out_x = data->glide_x_acc >> 8;
         int32_t out_y = data->glide_y_acc >> 8;
         data->glide_x_acc -= out_x << 8;
@@ -112,22 +117,22 @@ static void iqs5xx_inertia_work_handler(struct k_work *work) {
         }
     } else if (data->glide_mode == IQS5XX_GLIDE_SCROLL) {
         const int16_t scroll_div = 32;
-        data->glide_x_acc += data->vel_x;
-        data->glide_y_acc += data->vel_y;
-        int32_t step_x = data->glide_x_acc >> 8;
-        int32_t step_y = data->glide_y_acc >> 8;
-        data->glide_x_acc -= step_x << 8;
-        data->glide_y_acc -= step_y << 8;
-        if (step_x != 0) {
-            data->scroll_x_acc += step_x;
+        data->glide_x_acc += step_x;
+        data->glide_y_acc += step_y;
+        int32_t scroll_step_x = data->glide_x_acc >> 8;
+        int32_t scroll_step_y = data->glide_y_acc >> 8;
+        data->glide_x_acc -= scroll_step_x << 8;
+        data->glide_y_acc -= scroll_step_y << 8;
+        if (scroll_step_x != 0) {
+            data->scroll_x_acc += scroll_step_x;
             if (abs(data->scroll_x_acc) >= scroll_div) {
                 input_report_rel(dev, INPUT_REL_HWHEEL, data->scroll_x_acc / scroll_div, true,
                                  K_FOREVER);
                 data->scroll_x_acc %= scroll_div;
             }
         }
-        if (step_y != 0) {
-            data->scroll_y_acc += step_y;
+        if (scroll_step_y != 0) {
+            data->scroll_y_acc += scroll_step_y;
             if (abs(data->scroll_y_acc) >= scroll_div) {
                 input_report_rel(dev, INPUT_REL_WHEEL, data->scroll_y_acc / scroll_div, true,
                                  K_FOREVER);
@@ -154,6 +159,40 @@ static void iqs5xx_inertia_work_handler(struct k_work *work) {
 
     k_work_schedule_for_queue(&iqs5xx_work_q, &data->inertia_work,
                               K_MSEC(config->inertia_tick_ms));
+}
+
+static void iqs5xx_glide_clear(struct iqs5xx_data *data) {
+    k_work_cancel_delayable(&data->inertia_work);
+    data->glide_mode = IQS5XX_GLIDE_NONE;
+    data->vel_x = 0;
+    data->vel_y = 0;
+    data->glide_x_acc = 0;
+    data->glide_y_acc = 0;
+}
+
+static void iqs5xx_inertia_stop_work_handler(struct k_work *work) {
+    iqs5xx_glide_clear(CONTAINER_OF(work, struct iqs5xx_data, inertia_stop_work));
+}
+
+// Approximate speed (Q8 counts/report) from the velocity estimate: max + min/2.
+static int32_t iqs5xx_speed_q8(const struct iqs5xx_data *data) {
+    int32_t ax = abs(data->vel_x);
+    int32_t ay = abs(data->vel_y);
+    return MAX(ax, ay) + MIN(ax, ay) / 2;
+}
+
+static int32_t iqs5xx_accel_gain_q8(const struct iqs5xx_config *config, int32_t speed_q8) {
+    int32_t lo = (int32_t)config->accel_speed_low << 8;
+    int32_t hi = (int32_t)config->accel_speed_high << 8;
+    int32_t gmin = (int32_t)config->accel_gain_min * 256 / 100;
+    int32_t gmax = (int32_t)config->accel_gain_max * 256 / 100;
+    if (speed_q8 >= hi) {
+        return gmax;
+    }
+    if (speed_q8 <= lo) {
+        return gmin;
+    }
+    return gmin + (gmax - gmin) * ((speed_q8 - lo) >> 4) / ((hi - lo) >> 4);
 }
 
 /* ---- Runtime inertia control + flash persistence ---- */
@@ -257,6 +296,14 @@ void iqs5xx_inertia_adjust_min_speed(int delta) {
     iqs5xx_inertia_schedule_save(data);
 }
 
+void iqs5xx_inertia_stop(void) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    k_work_submit_to_queue(&iqs5xx_work_q, &data->inertia_stop_work);
+}
+
 void iqs5xx_inertia_reset(void) {
     struct iqs5xx_data *data = iqs5xx_inertia_data;
     const struct iqs5xx_config *config = iqs5xx_inertia_config;
@@ -324,14 +371,11 @@ static void iqs5xx_work_handler(struct k_work *work) {
     uint8_t fingers = block[4];
     if (fingers > 0 && data->last_fingers == 0) {
         // A new touch instantly stops any ongoing glide.
-        k_work_cancel_delayable(&data->inertia_work);
-        data->glide_mode = IQS5XX_GLIDE_NONE;
-        data->vel_x = 0;
-        data->vel_y = 0;
-        data->glide_x_acc = 0;
-        data->glide_y_acc = 0;
+        iqs5xx_glide_clear(data);
         data->scroll_x_acc = 0;
         data->scroll_y_acc = 0;
+        data->accel_x_acc = 0;
+        data->accel_y_acc = 0;
 
         data->drag_ignore_tap = false;
         if (data->tap_drag_armed &&
@@ -362,6 +406,9 @@ static void iqs5xx_work_handler(struct k_work *work) {
         if (enabled && (abs(data->vel_x) >= min_q8 || abs(data->vel_y) >= min_q8)) {
             data->glide_x_acc = 0;
             data->glide_y_acc = 0;
+            data->glide_gain_q8 = data->glide_mode == IQS5XX_GLIDE_CURSOR
+                                      ? iqs5xx_accel_gain_q8(config, iqs5xx_speed_q8(data))
+                                      : 256;
             k_work_schedule_for_queue(&iqs5xx_work_q, &data->inertia_work,
                                       K_MSEC(config->inertia_tick_ms));
         } else {
@@ -465,7 +512,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->glide_mode = IQS5XX_GLIDE_SCROLL;
             goto end_comm;
         }
-    } else if (tp_movement) {
+    } else if (tp_movement && fingers > 0) {
+        // Skip the lift report (fingers == 0): a thumb rolling off can move the centroid there.
         if (config->rotation_deg != 0) {
             data->rot_x_acc += rel_x * data->rot_cos_q14 - rel_y * data->rot_sin_q14;
             data->rot_y_acc += rel_x * data->rot_sin_q14 + rel_y * data->rot_cos_q14;
@@ -474,14 +522,22 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->rot_x_acc -= rel_x * (1 << 14);
             data->rot_y_acc -= rel_y * (1 << 14);
         }
-        if (rel_x != 0 || rel_y != 0) {
-            input_report_rel(dev, INPUT_REL_X, rel_x, false, K_FOREVER);
-            input_report_rel(dev, INPUT_REL_Y, rel_y, true, K_FOREVER);
-        }
-        // Track velocity for cursor inertia.
+        // Velocity (raw counts) drives both the acceleration gain and the glide.
         data->vel_x = (data->vel_x * 3 + ((int32_t)rel_x << 8)) >> 2;
         data->vel_y = (data->vel_y * 3 + ((int32_t)rel_y << 8)) >> 2;
         data->glide_mode = IQS5XX_GLIDE_CURSOR;
+
+        int32_t gain_q8 = iqs5xx_accel_gain_q8(config, iqs5xx_speed_q8(data));
+        data->accel_x_acc += rel_x * gain_q8;
+        data->accel_y_acc += rel_y * gain_q8;
+        int32_t out_x = data->accel_x_acc / 256;
+        int32_t out_y = data->accel_y_acc / 256;
+        data->accel_x_acc -= out_x * 256;
+        data->accel_y_acc -= out_y * 256;
+        if (out_x != 0 || out_y != 0) {
+            input_report_rel(dev, INPUT_REL_X, out_x, false, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_Y, out_y, true, K_FOREVER);
+        }
     }
 
 end_comm:
@@ -660,6 +716,7 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init(&data->work, iqs5xx_work_handler);
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
     k_work_init_delayable(&data->inertia_work, iqs5xx_inertia_work_handler);
+    k_work_init(&data->inertia_stop_work, iqs5xx_inertia_stop_work_handler);
 
     // Seed the runtime inertia parameters from the devicetree defaults; saved
     // settings (if any) override these at the APPLICATION init phase.
@@ -785,6 +842,10 @@ static int iqs5xx_init(const struct device *dev) {
         .natural_scroll_y = DT_INST_PROP(n, natural_scroll_y),                                     \
         .press_and_hold_time = DT_INST_PROP_OR(n, press_and_hold_time, 250),                       \
         .tap_and_drag = DT_INST_PROP(n, tap_and_drag),                                             \
+        .accel_gain_min = DT_INST_PROP_OR(n, accel_gain_min, 100),                                 \
+        .accel_gain_max = DT_INST_PROP_OR(n, accel_gain_max, 100),                                 \
+        .accel_speed_low = DT_INST_PROP_OR(n, accel_speed_low, 0),                                 \
+        .accel_speed_high = DT_INST_PROP_OR(n, accel_speed_high, 0),                               \
         .tap_distance = DT_INST_PROP_OR(n, tap_distance, 0),                                       \
         .touch_threshold_increase = DT_INST_PROP_OR(n, touch_threshold_increase, 0),               \
         .switch_xy = DT_INST_PROP(n, switch_xy),                                                   \

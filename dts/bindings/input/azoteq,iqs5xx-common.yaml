@@ -149,5 +149,33 @@ properties:
   inertia-tick-ms:
     type: int
     description: |
-      Interval in ms between synthetic glide reports while coasting.
+      Interval in ms between synthetic glide reports while coasting. The glide
+      starts at the release speed whatever this value is.
     default: 8
+
+  accel-gain-min:
+    type: int
+    description: |
+      Pointer acceleration: cursor gain in percent at or below accel-speed-low.
+      100 with accel-gain-max 100 disables acceleration.
+    default: 100
+
+  accel-gain-max:
+    type: int
+    description: |
+      Pointer acceleration: cursor gain in percent at or above accel-speed-high.
+      A glide keeps the gain reached at release.
+    default: 100
+
+  accel-speed-low:
+    type: int
+    description: |
+      Finger speed (counts per report, before any input-processor scaling) up to
+      which accel-gain-min applies. The gain ramps linearly up to accel-speed-high.
+    default: 0
+
+  accel-speed-high:
+    type: int
+    description: |
+      Finger speed (counts per report) from which accel-gain-max applies.
+    default: 0
