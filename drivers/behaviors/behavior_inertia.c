@@ -84,9 +84,6 @@ static int inertia_layer_state_listener(const zmk_event_t *eh) {
 ZMK_LISTENER(behavior_inertia_layer, inertia_layer_state_listener);
 ZMK_SUBSCRIPTION(behavior_inertia_layer, zmk_layer_state_changed);
 
-bool iqs5xx_ble_can_send(void) {
-#if IS_ENABLED(CONFIG_ZMK_BLE)
-    if (zmk_endpoint_get_selected().transport != ZMK_TRANSPORT_BLE) {
-        retuis_ble_transport(void) {
+bool iqs5xx_is_ble_transport(void) {
     return zmk_endpoint_get_selected().transport == ZMK_TRANSPORT_BLE;
 }
