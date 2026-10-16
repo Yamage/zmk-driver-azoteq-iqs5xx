@@ -34,6 +34,9 @@ void iqs5xx_inertia_reset(void);
 // Stop an ongoing glide immediately (no-op when not gliding).
 void iqs5xx_inertia_stop(void);
 
+// True when ZMK's active output endpoint is BLE (implemented in behavior_inertia.c).
+bool iqs5xx_is_ble_transport(void);
+
 #ifdef __cplusplus
 }
 #endif

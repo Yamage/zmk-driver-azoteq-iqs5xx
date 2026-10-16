@@ -180,3 +180,12 @@ properties:
     description: |
       Finger speed (counts per report) from which accel-gain-max applies.
     default: 0
+
+  ble-min-report-interval-ms:
+    type: int
+    description: |
+      Minimum interval in ms between emitted cursor reports when ZMK's active
+      output is BLE. Reports arriving sooner are summed into the next emission so
+      the BLE notification queue cannot fall behind on a noisy link. USB output
+      is unaffected. 0 disables coalescing.
+    default: 0

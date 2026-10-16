@@ -31,6 +31,53 @@ LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 #define IQS5XX_MIN_SPEED_MIN 0
 #define IQS5XX_MIN_SPEED_MAX 60
 
+// Default weak stub when ZMK_BEHAVIOR_INERTIA is not compiled in.
+__weak bool iqs5xx_is_ble_transport(void) { return false; }
+
+static void iqs5xx_emit_cursor_now(struct iqs5xx_data *data) {
+    if (data->ble_pending_x == 0 && data->ble_pending_y == 0) {
+        return;
+    }
+    int16_t out_x = CLAMP(data->ble_pending_x, INT16_MIN, INT16_MAX);
+    int16_t out_y = CLAMP(data->ble_pending_y, INT16_MIN, INT16_MAX);
+    data->ble_pending_x = 0;
+    data->ble_pending_y = 0;
+    data->last_ble_emit_ms = k_uptime_get();
+    input_report_rel(data->dev, INPUT_REL_X, out_x, false, K_FOREVER);
+    input_report_rel(data->dev, INPUT_REL_Y, out_y, true, K_FOREVER);
+}
+
+static void iqs5xx_ble_flush_work_handler(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, ble_flush_work);
+    iqs5xx_emit_cursor_now(data);
+}
+
+static void iqs5xx_report_cursor(struct iqs5xx_data *data, int32_t dx, int32_t dy) {
+    if (dx == 0 && dy == 0) {
+        return;
+    }
+    const struct iqs5xx_config *config = data->dev->config;
+    data->ble_pending_x += dx;
+    data->ble_pending_y += dy;
+
+    if (config->ble_min_report_interval_ms == 0 || !iqs5xx_is_ble_transport()) {
+        k_work_cancel_delayable(&data->ble_flush_work);
+        iqs5xx_emit_cursor_now(data);
+        return;
+    }
+
+    int64_t elapsed = k_uptime_get() - data->last_ble_emit_ms;
+    int64_t min_ms = config->ble_min_report_interval_ms;
+    if (elapsed >= min_ms) {
+        k_work_cancel_delayable(&data->ble_flush_work);
+        iqs5xx_emit_cursor_now(data);
+    } else {
+        k_work_schedule_for_queue(&iqs5xx_work_q, &data->ble_flush_work,
+                                  K_MSEC(min_ms - elapsed));
+    }
+}
+
 // Single trackpad instance, captured at init so the keymap behavior and the
 // settings handler can reach the runtime inertia state.
 static struct iqs5xx_data *iqs5xx_inertia_data;
@@ -64,10 +111,7 @@ static int iqs5xx_write_reg8(const struct device *dev, uint16_t reg, uint8_t val
 static int iqs5xx_end_comm_window(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     uint8_t buf[3] = {IQS5XX_END_COMM_WINDOW >> 8, IQS5XX_END_COMM_WINDOW & 0xFF, 0x00};
-
-    return i2c_write_dt(&config->i2c, buf, sizeof(buf));
-}
-
+qs5xx_report_cursor(data, out_x, out_y);
 static void iqs5xx_button_release_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, button_release_work);
@@ -166,6 +210,8 @@ static void iqs5xx_glide_clear(struct iqs5xx_data *data) {
     data->glide_mode = IQS5XX_GLIDE_NONE;
     data->vel_x = 0;
     data->vel_y = 0;
+    k_work_cancel_delayable(&data->ble_flush_work);
+    iqs5xx_emit_cursor_now(data);
     data->glide_x_acc = 0;
     data->glide_y_acc = 0;
 }
@@ -532,10 +578,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->accel_y_acc += rel_y * gain_q8;
         int32_t out_x = data->accel_x_acc / 256;
         int32_t out_y = data->accel_y_acc / 256;
-        data->accel_x_acc -= out_x * 256;
-        data->accel_y_acc -= out_y * 256;
-        if (out_x != 0 || out_y != 0) {
-            input_report_rel(dev, INPUT_REL_X, out_x, false, K_FOREVER);
+        dqs5xx_report_cursor(data, out_x, out_y);   input_report_rel(dev, INPUT_REL_X, out_x, false, K_FOREVER);
             input_report_rel(dev, INPUT_REL_Y, out_y, true, K_FOREVER);
         }
     }
@@ -718,7 +761,8 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init_delayable(&data->button_release_work, iqs5xx_button_release_work_handler);
     k_work_init_delayable(&data->inertia_work, iqs5xx_inertia_work_handler);
     k_work_init(&data->inertia_stop_work, iqs5xx_inertia_stop_work_handler);
-
+_delayable(&data->ble_flush_work, iqs5xx_ble_flush_work_handler);
+    k_work_init
     // Seed the runtime inertia parameters from the devicetree defaults; saved
     // settings (if any) override these at the APPLICATION init phase.
     iqs5xx_inertia_data = data;
@@ -847,6 +891,7 @@ static int iqs5xx_init(const struct device *dev) {
         .accel_gain_max = DT_INST_PROP_OR(n, accel_gain_max, 100),                                 \
         .accel_speed_low = DT_INST_PROP_OR(n, accel_speed_low, 0),                                 \
         .accel_speed_high = DT_INST_PROP_OR(n, accel_speed_high, 0),                               \
+        .ble_min_report_interval_ms = DT_INST_PROP_OR(n, ble_min_report_interval_ms, 0),           \
         .tap_distance = DT_INST_PROP_OR(n, tap_distance, 0),                                       \
         .touch_threshold_increase = DT_INST_PROP_OR(n, touch_threshold_increase, 0),               \
         .switch_xy = DT_INST_PROP(n, switch_xy),                                                   \

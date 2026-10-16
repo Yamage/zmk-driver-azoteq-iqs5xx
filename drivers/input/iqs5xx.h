@@ -180,6 +180,9 @@ struct iqs5xx_config {
     uint16_t accel_gain_max;
     uint16_t accel_speed_low;
     uint16_t accel_speed_high;
+
+    // Minimum interval in ms between mouse reports when outputting over BLE (0 = no coalescing).
+    uint16_t ble_min_report_interval_ms;
 };
 
 // Chip's active report period when active-report-rate is left at 0.
@@ -215,6 +218,10 @@ struct iqs5xx_data {
     struct k_work inertia_stop_work; // Stops a glide from outside the report queue.
     int32_t accel_x_acc; // Q8 fractional carry for accelerated cursor output.
     int32_t accel_y_acc;
+    int32_t ble_pending_x; // Coalesced cursor deltas waiting for the next BLE send window.
+    int32_t ble_pending_y;
+    int64_t last_ble_emit_ms;
+    struct k_work_delayable ble_flush_work;
     uint8_t last_fingers; // Finger count from the previous report (touch/release edge).
 
     // Tap-and-drag state.
