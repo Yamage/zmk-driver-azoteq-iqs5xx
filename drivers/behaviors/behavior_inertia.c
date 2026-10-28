@@ -38,6 +38,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define INERTIA_MIN_SPEED_DOWN 4
 #define INERTIA_RESET 5
 #define INERTIA_BLE_DIAG 6
+#define INERTIA_KEYMAP_GUIDE 7
 
 /* Tuning step sizes for the adjustable parameters. */
 #define INERTIA_FRICTION_STEP 8
@@ -45,10 +46,81 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define DIAG_TYPE_STEP_MS 12
 
 static char diag_buf[256];
+static const char *diag_active_text;
 static size_t diag_pos;
 static uint32_t diag_active_keycode;
 static bool diag_key_pressed;
 static struct k_work_delayable diag_type_work;
+
+static const char keymap_guide_ascii[] =
+    "=== My Keyboard Layer & Keymap Guide ===\n"
+    "[Layer Tree]\n"
+    "Base\n"
+    " +- Hold [ (L-mid6) ---------> Layer1 (Symbols / Numbers / Arrows)\n"
+    " |   +- Hold } (R-mid1) -----> Layer3 (F1-F12 / NumPad Ops)\n"
+    " +- Hold ] (R-mid1) ---------> Layer2 (Edit / NumPad / IME)\n"
+    " |   +- Hold { (L-mid6) -----> Layer3 (F1-F12 / NumPad Ops)\n"
+    " |   +- Hold Q (L-top1) -----> Layer6 (BLE / Studio / Diag)\n"
+    " |       +- Hold R-top1 -----> Layer7 (Touchpad Inertia)\n"
+    " +- Touchpad move -----------> Layer4 (Auto Mouse)\n"
+    "     +- Hold S or ; ---------> Layer5 (Scroll)\n"
+    "\n"
+    "[Base] (Hold on R-bot3..6: M=Win, ,=Alt, .=Ctrl, /=Shift)\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  Q   |  W   |  E   |  R   |  T   | CTRL |  | SHFT |  Y   |  U   |  I   |  O   |  P   |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  A   |  S   |  D   |  F   |  G   |[ /L1 |  |] /L2 |  H   |  J   |  K   |  L   |  ;   |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  Z   |  X   |  C   |  V   |  B   | SPC  |  | ENT  |  N   |M/Win |,/Alt |./Ctl |//Sft |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "\n"
+    "[Layer1: Symbols / Numbers / Arrows] (Hold [ on L-mid6)\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  !   |  @   |  #   |  $   |  %   |  ..  |  | SHFT |  ^   |  &   |  *   |  '   |  =   |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  1   |  2   |  3   |  4   |  5   |  ..  |  |} /L3 | Left | Down |  Up  |Right |  :   |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  6   |  7   |  8   |  9   |  0   |  ..  |  | ENT  |  -   |  +   |  (   |  )   |  ?   |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "\n"
+    "[Layer2: Edit / NumPad / IME] (Hold ] on R-mid1)\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "| ->L6 |  ..  |  ..  |  ..  |  ..  | CTRL |  | ALT  |  ..  |S+INS | DEL  | BSPC | ESC  |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "| KP 1 | KP 2 | KP 3 | KP 4 | KP 5 |{ /L3 |  |  ..  |  ..  | PgDn | PgUp |  ..  |Alt+` |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "| KP 6 | KP 7 | KP 8 | KP 9 | KP 0 | TAB  |  | ENT  |  '   |  ..  | ALT  | CTRL |\\/Sft |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "\n"
+    "[Layer3: F1-F12 / NumPad Ops] (Hold [ + ] together)\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "| F11  | F12  |  ..  |  ..  |  ..  |  ..  |  |  ..  |  `   |  ..  |  ..  |  \"   |  |   |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  F1  |  F2  |  F3  |  F4  |  F5  |  ..  |  |  ..  |  ..  | PgDn | PgUp | CTRL | SHFT |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  F6  |  F7  |  F8  |  F9  | F10  |  ..  |  |  ..  | KP - | KP + | ALT  |KP./C |KP//S |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "\n"
+    "[Layer4: Auto Mouse] (Active while touching trackpad)\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  ..  |  ..  |  ..  |  ..  |  ..  |  ..  |  |  ..  |  ..  |  ..  |  ..  |  ..  |  ..  |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  ..  |Scrl5 | RClk | MClk | LClk |[ /L1 |  |] /L2 |  ..  |  ..  |  ..  |  ..  |Scrl5 |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|Z/Sft |X/Ctl |C/Alt |  ..  |  ..  |  ..  |  |  ..  | LClk | MClk | RClk |  ..  |  ..  |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "\n"
+    "[Layer6: BLE / Studio / Diag] (Layer2 + Hold Q on L-top1)\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  ..  |  ..  |  ..  |  ..  | Diag |  ..  |  | ->L7 | BT 0 | BT 1 | BT 2 | BT 3 | BT 4 |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  ..  |  ..  |  ..  |  ..  |  ..  |  ..  |  |  ..  |  ..  |  ..  |Guide |  ..  |  ..  |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "|  ..  |  ..  |  ..  |  ..  |  ..  |  ..  |  |  ..  |BT_CLR|OUT_TG|Unlock|  ..  |  ..  |\n"
+    "+------+------+------+------+------+------+  +------+------+------+------+------+------+\n"
+    "\n"
+    "[Layer7: Touchpad Inertia] (Layer6 + Hold R-top1)\n"
+    "R-top2..5: Fric+ / Fric- / MinSpd+ / MinSpd- | R-mid2: Toggle | R-bot2: Reset\n";
 
 static uint32_t char_to_zmk_keycode(char c) {
     if (c >= 'a' && c <= 'z') {
@@ -77,8 +149,12 @@ static uint32_t char_to_zmk_keycode(char c) {
         return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_EQUAL_AND_PLUS));
     case '[':
         return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_LEFT_BRACKET_AND_LEFT_BRACE);
+    case '{':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_LEFT_BRACKET_AND_LEFT_BRACE));
     case ']':
         return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_RIGHT_BRACKET_AND_RIGHT_BRACE);
+    case '}':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_RIGHT_BRACKET_AND_RIGHT_BRACE));
     case '(':
         return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_9_AND_LEFT_PARENTHESIS));
     case ')':
@@ -87,20 +163,46 @@ static uint32_t char_to_zmk_keycode(char c) {
         return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_SEMICOLON_AND_COLON));
     case ';':
         return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_SEMICOLON_AND_COLON);
+    case '\'':
+        return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_APOSTROPHE_AND_QUOTE);
+    case '"':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_APOSTROPHE_AND_QUOTE));
+    case '`':
+        return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_GRAVE_ACCENT_AND_TILDE);
+    case '~':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_GRAVE_ACCENT_AND_TILDE));
     case '/':
         return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_SLASH_AND_QUESTION_MARK);
+    case '?':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_SLASH_AND_QUESTION_MARK));
+    case '\\':
+        return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_BACKSLASH_AND_PIPE);
     case '|':
         return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_BACKSLASH_AND_PIPE));
     case '%':
         return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_5_AND_PERCENT));
     case '.':
         return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_PERIOD_AND_GREATER_THAN);
+    case '>':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_PERIOD_AND_GREATER_THAN));
     case ',':
         return ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_COMMA_AND_LESS_THAN);
+    case '<':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_COMMA_AND_LESS_THAN));
     case '!':
         return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_1_AND_EXCLAMATION));
+    case '@':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_2_AND_AT));
     case '#':
         return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_3_AND_HASH));
+    case '$':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_4_AND_DOLLAR));
+    case '^':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_6_AND_CARET));
+    case '&':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_7_AND_AMPERSAND));
+    case '*':
+        return LS(ZMK_HID_USAGE(HID_USAGE_KEY, HID_USAGE_KEY_KEYBOARD_8_AND_ASTERISK));
     default:
         return 0;
     }
@@ -239,21 +341,48 @@ static void build_ble_diag_report(char *buf, size_t size) {
 #endif
 }
 
+static bool stop_active_typing_if_running(void) {
+    bool was_running = k_work_delayable_is_pending(&diag_type_work) || diag_key_pressed ||
+                       (diag_active_text != NULL && diag_active_text[diag_pos] != '\0');
+    k_work_cancel_delayable(&diag_type_work);
+    if (diag_key_pressed) {
+        raise_zmk_keycode_state_changed_from_encoded(diag_active_keycode, false, k_uptime_get());
+        diag_key_pressed = false;
+    }
+    diag_active_text = NULL;
+    diag_pos = 0;
+    return was_running;
+}
+
+static void start_text_typing(const char *text) {
+    if (stop_active_typing_if_running()) {
+        return;
+    }
+    diag_active_text = text;
+    diag_pos = 0;
+    k_work_schedule(&diag_type_work, K_MSEC(80));
+}
+
 static void diag_type_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
 
     if (diag_key_pressed) {
         raise_zmk_keycode_state_changed_from_encoded(diag_active_keycode, false, k_uptime_get());
         diag_key_pressed = false;
-        if (diag_buf[diag_pos] == '\0') {
+        if (diag_active_text == NULL || diag_active_text[diag_pos] == '\0') {
+            diag_active_text = NULL;
             return;
         }
         k_work_schedule(&diag_type_work, K_MSEC(DIAG_TYPE_STEP_MS));
         return;
     }
 
-    while (diag_buf[diag_pos] != '\0') {
-        uint32_t kc = char_to_zmk_keycode(diag_buf[diag_pos++]);
+    if (diag_active_text == NULL) {
+        return;
+    }
+
+    while (diag_active_text[diag_pos] != '\0') {
+        uint32_t kc = char_to_zmk_keycode(diag_active_text[diag_pos++]);
         if (kc == 0) {
             continue;
         }
@@ -263,15 +392,15 @@ static void diag_type_work_handler(struct k_work *work) {
         k_work_schedule(&diag_type_work, K_MSEC(DIAG_TYPE_STEP_MS));
         return;
     }
+    diag_active_text = NULL;
 }
 
 static void start_ble_diag_typing(void) {
-    k_work_cancel_delayable(&diag_type_work);
-    if (diag_key_pressed) {
-        raise_zmk_keycode_state_changed_from_encoded(diag_active_keycode, false, k_uptime_get());
-        diag_key_pressed = false;
+    if (stop_active_typing_if_running()) {
+        return;
     }
     build_ble_diag_report(diag_buf, sizeof(diag_buf));
+    diag_active_text = diag_buf;
     diag_pos = 0;
     k_work_schedule(&diag_type_work, K_MSEC(80));
 }
@@ -299,6 +428,9 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
         break;
     case INERTIA_BLE_DIAG:
         start_ble_diag_typing();
+        break;
+    case INERTIA_KEYMAP_GUIDE:
+        start_text_typing(keymap_guide_ascii);
         break;
     default:
         LOG_WRN("Unknown inertia action %d", binding->param1);
