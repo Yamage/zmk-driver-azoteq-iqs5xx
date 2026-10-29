@@ -81,7 +81,7 @@ static const char keymap_guide_ascii[] =
     "\n"
     "[L2 Edit/NumPad/IME]\n"
     "->L6  ..    ..    ..    ..    CTRL  | ALT   ..    S+INS DEL   BSPC  ESC\n"
-    "KP1   KP2   KP3   KP4   KP5   {/L3  | ..    ..    PgDn  PgUp  ..    Alt+`\n"
+    "KP1   KP2   KP3   KP4   KP5   {/L3  | ..    ..    PgDn  PgUp  C+Spc Alt+`\n"
     "KP6   KP7   KP8   KP9   KP0   TAB   | ENT   '     ..    ALT   CTRL  \\/Sft\n"
     "\n"
     "[L3 Fn/NumPad Ops]\n"
