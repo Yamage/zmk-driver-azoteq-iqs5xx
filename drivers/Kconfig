@@ -1,2 +1,3 @@
 rsource "input/Kconfig"
 rsource "behaviors/Kconfig"
+rsource "crash_guard/Kconfig"

@@ -28,6 +28,10 @@
 
 #include <iqs5xx_inertia.h>
 
+#if IS_ENABLED(CONFIG_ZMK_CRASH_GUARD)
+#include <zmk_crash_guard.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Action codes carried in the behavior binding parameter. */
@@ -45,7 +49,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define INERTIA_MIN_SPEED_STEP 2
 #define DIAG_TYPE_STEP_MS 12
 
-static char diag_buf[256];
+static char diag_buf[512];
 static const char *diag_active_text;
 static size_t diag_pos;
 static uint32_t diag_active_keycode;
@@ -337,6 +341,12 @@ static void build_ble_diag_report(char *buf, size_t size) {
     }
     if (split_conn != NULL) {
         bt_conn_unref(split_conn);
+    }
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_CRASH_GUARD)
+    if (off > 0 && (size_t)off < size) {
+        off += zmk_crash_guard_format(buf + off, size - off);
     }
 #endif
 }

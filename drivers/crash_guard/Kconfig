@@ -1,0 +1,62 @@
+config ZMK_CRASH_GUARD
+    bool "Record fatal errors and hangs, then reboot automatically"
+    select THREAD_NAME
+    select REBOOT
+    select HWINFO
+    help
+      Replace the default "halt forever" fatal error handler with one that
+      records the reason, faulting thread and PC/LR in RAM that survives a
+      soft reset, then reboots. The last record and a crash counter are saved
+      to settings and can be printed with zmk_crash_guard_format().
+
+if ZMK_CRASH_GUARD
+
+config ZMK_CRASH_GUARD_WATCHDOG
+    bool "Detect hung work queues with the task watchdog"
+    default y
+    select TASK_WDT
+    help
+      Feed a task watchdog channel from each watched work queue (the system
+      work queue plus any queue registered with zmk_crash_guard_watch_work_q()).
+      A queue that does not run within the timeout is recorded as a hang and
+      the system reboots.
+
+if ZMK_CRASH_GUARD_WATCHDOG
+
+config ZMK_CRASH_GUARD_HW_WATCHDOG
+    bool "Back the task watchdog with the hardware watchdog"
+    default y
+    select WATCHDOG
+    help
+      Resets the chip even when interrupts stay blocked (the task watchdog
+      itself relies on the kernel timer interrupt). Such a reset is reported
+      from the reset cause, without thread or PC details.
+
+config ZMK_CRASH_GUARD_WATCHDOG_TIMEOUT_MS
+    int "Hang timeout for watched work queues (ms)"
+    default 5000
+    range 1000 10000
+
+config ZMK_CRASH_GUARD_WATCHDOG_FEED_MS
+    int "Feed interval for watched work queues (ms)"
+    default 1000
+
+config ZMK_CRASH_GUARD_MAX_WATCHES
+    int "Maximum number of watched work queues"
+    default 4
+
+# All channels share one timeout, so the background hardware watchdog feed only
+# has to run that often (the 100 ms default would wake the CPU 10 times/s).
+config TASK_WDT_MIN_TIMEOUT
+    default ZMK_CRASH_GUARD_WATCHDOG_TIMEOUT_MS
+
+config TASK_WDT_HW_FALLBACK
+    default n if !ZMK_CRASH_GUARD_HW_WATCHDOG
+
+# Leave the software callback time to record the hang before the hardware resets.
+config TASK_WDT_HW_FALLBACK_DELAY
+    default 1000
+
+endif # ZMK_CRASH_GUARD_WATCHDOG
+
+endif # ZMK_CRASH_GUARD

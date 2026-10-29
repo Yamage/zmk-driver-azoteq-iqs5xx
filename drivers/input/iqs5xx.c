@@ -23,6 +23,10 @@
 #include "iqs5xx.h"
 #include <iqs5xx_inertia.h>
 
+#if IS_ENABLED(CONFIG_ZMK_CRASH_GUARD_WATCHDOG)
+#include <zmk_crash_guard.h>
+#endif
+
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
 // Bounds for the runtime-tunable inertia parameters.
@@ -788,6 +792,9 @@ static int iqs5xx_init(const struct device *dev) {
                            CONFIG_INPUT_AZOTEQ_IQS5XX_WORKQUEUE_PRIORITY, NULL);
         k_thread_name_set(&iqs5xx_work_q.thread, "iqs5xx");
         iqs5xx_work_q_started = true;
+#if IS_ENABLED(CONFIG_ZMK_CRASH_GUARD_WATCHDOG)
+        zmk_crash_guard_watch_work_q(&iqs5xx_work_q, "iqs5xx");
+#endif
     }
 
     // Configure reset GPIO if available.
