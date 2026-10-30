@@ -844,13 +844,36 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
-    // Optionally raise the active mode report rate for a smoother cursor.
-    if (config->active_report_rate != 0) {
-        ret = iqs5xx_write_reg16(dev, IQS5XX_ACTIVE_REPORT_RATE, config->active_report_rate);
-        if (ret < 0) {
-            LOG_ERR("Failed to set active report rate: %d", ret);
-            return ret;
-        }
+    /*
+     * Configure report rates (0x057A..0x0583) and mode timeouts (0x0584..0x0587)
+     * in a single 14-byte contiguous I2C burst write so the bus time stays minimal:
+     * - Active rate: config->active_report_rate (default 8 ms = 125 Hz)
+     * - Idle Touch rate: 25 ms (40 Hz) while finger rests without moving
+     * - Idle rate: 30 ms (33 Hz) just after release for instant wake
+     * - LP1 rate: 50 ms (20 Hz), LP2 rate: 100 ms (10 Hz) for deep idle
+     * - Timeouts (in 500 ms units): Active->Idle after 1 s (2),
+     *   IdleTouch->Idle after 2 s (4), Idle->LP1 after 2 s (4), LP1->LP2 after 10 s (20).
+     */
+    uint16_t act_rate =
+        config->active_report_rate ? config->active_report_rate : IQS5XX_DEFAULT_REPORT_MS;
+    uint8_t power_Profile[16] = {
+        IQS5XX_ACTIVE_REPORT_RATE >> 8,
+        IQS5XX_ACTIVE_REPORT_RATE & 0xFF,
+        (uint8_t)(act_rate >> 8),
+        (uint8_t)(act_rate & 0xFF),
+        0, 25,  // IDLE_TOUCH_REPORT_RATE = 25 ms
+        0, 30,  // IDLE_REPORT_RATE = 30 ms
+        0, 50,  // LP1_REPORT_RATE = 50 ms
+        0, 100, // LP2_REPORT_RATE = 100 ms
+        2,      // ACTIVE_TIMEOUT = 1 s
+        4,      // IDLE_TOUCH_TIMEOUT = 2 s
+        4,      // IDLE_TIMEOUT = 2 s
+        20,     // LP1_TIMEOUT = 10 s
+    };
+    ret = i2c_write_dt(&config->i2c, power_Profile, sizeof(power_Profile));
+    if (ret < 0) {
+        LOG_ERR("Failed to set report rates and power timeouts: %d", ret);
+        return ret;
     }
 
     ret = iqs5xx_write_reg8(dev, IQS5XX_BOTTOM_BETA, config->bottom_beta);
