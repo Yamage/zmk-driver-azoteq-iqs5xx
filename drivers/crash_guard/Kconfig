@@ -34,12 +34,12 @@ config ZMK_CRASH_GUARD_HW_WATCHDOG
 
 config ZMK_CRASH_GUARD_WATCHDOG_TIMEOUT_MS
     int "Hang timeout for watched work queues (ms)"
-    default 10000
-    range 1000 30000
+    default 5000
+    range 1000 10000
 
 config ZMK_CRASH_GUARD_WATCHDOG_FEED_MS
     int "Feed interval for watched work queues (ms)"
-    default 5000
+    default 2000
 
 config ZMK_CRASH_GUARD_MAX_WATCHES
     int "Maximum number of watched work queues"
