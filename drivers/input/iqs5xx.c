@@ -465,7 +465,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
     int ret;
 
     /*
-     * Read the contiguous data block (0x000D..0x001C) in a single I2C
+     * Read the whole contiguous data block (0x000D..0x0015) in a single I2C
      * transaction instead of one read per register. Fewer transactions keep
      * the per-report bus time well inside the RDY comm window, which avoids
      * dropped reports (RR_MISSED) and makes the cursor refresh smoothly.
@@ -476,11 +476,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
      *   [4] number of fingers
      *   [5..6] relative X (big-endian, int16)
      *   [7..8] relative Y (big-endian, int16)
-     *   [9..12] absolute X/Y Finger 1 (unused)
-     *   [13..14] touch strength Finger 1 (big-endian, uint16)
-     *   [15] touch area / size Finger 1 (uint8)
      */
-    uint8_t block[16];
+    uint8_t block[9];
     uint8_t block_reg[2] = {IQS5XX_GESTURE_EVENTS_0 >> 8, IQS5XX_GESTURE_EVENTS_0 & 0xFF};
     ret = i2c_write_read_dt(&config->i2c, block_reg, sizeof(block_reg), block, sizeof(block));
     if (ret < 0) {
@@ -494,8 +491,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
     uint8_t sys_info_1 = block[3];
     int16_t rel_x = (int16_t)((block[5] << 8) | block[6]);
     int16_t rel_y = (int16_t)((block[7] << 8) | block[8]);
-    uint16_t touch_strength = ((uint16_t)block[13] << 8) | block[14];
-    uint8_t touch_area = block[15];
 
     // Handle reset indication.
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
@@ -513,7 +508,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->scroll_y_acc = 0;
     }
 
-    // Touch/release edge detection for the inertia glide and thumb contact guard.
+    // Touch/release edge detection for the inertia glide.
     uint8_t fingers = block[4];
     if (fingers > 0 && data->last_fingers == 0) {
         // A new touch instantly stops any ongoing glide.
@@ -524,9 +519,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->accel_y_acc = 0;
         data->rot_x_acc = 0;
         data->rot_y_acc = 0;
-        data->peak_touch_strength = touch_strength;
-        data->peak_touch_area = touch_area;
-        data->touch_age = 1;
 
         data->drag_ignore_tap = false;
         if (data->tap_drag_armed &&
@@ -540,10 +532,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->drag_active = true;
         }
         data->tap_drag_armed = false;
-    } else if (fingers > 0) {
-        if (data->touch_age < UINT8_MAX) {
-            data->touch_age++;
-        }
     } else if (fingers == 0 && data->last_fingers > 0 && data->drag_active) {
         input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
         data->drag_active = false;
@@ -552,9 +540,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->glide_mode = IQS5XX_GLIDE_NONE;
         data->vel_x = 0;
         data->vel_y = 0;
-        data->peak_touch_strength = 0;
-        data->peak_touch_area = 0;
-        data->touch_age = 0;
     } else if (fingers == 0 && data->last_fingers > 0) {
         // The finger was lifted: start gliding if the release was fast enough.
         bool enabled = data->inertia_enabled &&
@@ -575,9 +560,6 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->vel_x = 0;
             data->vel_y = 0;
         }
-        data->peak_touch_strength = 0;
-        data->peak_touch_area = 0;
-        data->touch_age = 0;
     }
     data->last_fingers = fingers;
 
@@ -675,37 +657,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
             goto end_comm;
         }
     } else if (tp_movement && fingers > 0) {
-        /*
-         * Thumb landing & lift-off contact guard:
-         * A broad thumb pad shifts its capacitive centroid both on initial touch-down
-         * (first report as the pad flattens) and during the last 1-2 reports of lift-off
-         * (when contact area / signal strength drops below ~60% of the stroke peak while
-         * peeling off the edge of the thumb). Dropping those reports keeps the cursor
-         * pinned on the target when lifting off and preserves the true flick velocity
-         * in vel_x/vel_y just before lift-off.
-         */
-        if (data->touch_age <= 1) {
-            goto end_comm;
-        }
-        bool peeling_off =
-            (data->peak_touch_strength > 0 &&
-             (uint32_t)touch_strength * 100 < (uint32_t)data->peak_touch_strength * 62) ||
-            (data->peak_touch_area >= 2 &&
-             (uint32_t)touch_area * 100 < (uint32_t)data->peak_touch_area * 65);
-        if (peeling_off) {
-            goto end_comm;
-        }
-        if (touch_strength > data->peak_touch_strength) {
-            data->peak_touch_strength = touch_strength;
-        } else {
-            // Slowly adapt peak downward so shifting to the thumb tip during a long stroke stays valid.
-            data->peak_touch_strength -=
-                (data->peak_touch_strength - touch_strength) >> 4;
-        }
-        if (touch_area > data->peak_touch_area) {
-            data->peak_touch_area = touch_area;
-        }
-
+        // Skip the lift report (fingers == 0): a thumb rolling off can move the centroid there.
         if (data->rotation_deg_rt != 0) {
             data->rot_x_acc += rel_x * data->rot_cos_q14 - rel_y * data->rot_sin_q14;
             data->rot_y_acc += rel_x * data->rot_sin_q14 + rel_y * data->rot_cos_q14;
