@@ -43,10 +43,16 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define INERTIA_RESET 5
 #define INERTIA_BLE_DIAG 6
 #define INERTIA_KEYMAP_GUIDE 7
+#define INERTIA_ROT_CW 8
+#define INERTIA_ROT_CCW 9
+#define INERTIA_SCALE_UP 10
+#define INERTIA_SCALE_DOWN 11
 
 /* Tuning step sizes for the adjustable parameters. */
 #define INERTIA_FRICTION_STEP 8
 #define INERTIA_MIN_SPEED_STEP 2
+#define INERTIA_ROT_STEP_DEG 5
+#define INERTIA_SCALE_STEP_PCT 10
 #define DIAG_TYPE_STEP_MS 12
 
 static char diag_buf[512];
@@ -99,9 +105,9 @@ static const char keymap_guide_ascii[] =
     "..    ..    ..    ..    ..    ..    | ..    ..    ..    Guide ..    ..\n"
     "..    ..    ..    ..    ..    ..    | ..    BTCLR OutTg Unlck ..    ..\n"
     "\n"
-    "[L7 Touchpad (Fric=glide friction, MSpd=min flick speed, Inert=on/off)]\n"
+    "[L7 Touchpad (Fric=glide, MSpd=flick, Rot=angle, Spd=cursor speed)]\n"
     "..    ..    ..    ..    ..    ..    | ..    Fric+ Fric- MSpd+ MSpd- ..\n"
-    "..    ..    ..    ..    ..    ..    | ..    Inert ..    ..    ..    ..\n"
+    "..    ..    ..    ..    ..    ..    | ..    Inert Rot+  Rot-  Spd+  Spd-\n"
     "..    ..    ..    ..    ..    ..    | ..    Reset ..    ..    ..    ..\n";
 
 static uint32_t char_to_zmk_keycode(char c) {
@@ -322,6 +328,10 @@ static void build_ble_diag_report(char *buf, size_t size) {
     }
 #endif
 
+    if (off > 0 && (size_t)off < size) {
+        off += iqs5xx_format_status(buf + off, size - off);
+    }
+
 #if IS_ENABLED(CONFIG_ZMK_CRASH_GUARD)
     if (off > 0 && (size_t)off < size) {
         off += zmk_crash_guard_format(buf + off, size - off);
@@ -419,6 +429,18 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
         break;
     case INERTIA_KEYMAP_GUIDE:
         start_text_typing(keymap_guide_ascii);
+        break;
+    case INERTIA_ROT_CW:
+        iqs5xx_adjust_rotation(INERTIA_ROT_STEP_DEG);
+        break;
+    case INERTIA_ROT_CCW:
+        iqs5xx_adjust_rotation(-INERTIA_ROT_STEP_DEG);
+        break;
+    case INERTIA_SCALE_UP:
+        iqs5xx_adjust_cursor_scale(INERTIA_SCALE_STEP_PCT);
+        break;
+    case INERTIA_SCALE_DOWN:
+        iqs5xx_adjust_cursor_scale(-INERTIA_SCALE_STEP_PCT);
         break;
     default:
         LOG_WRN("Unknown inertia action %d", binding->param1);

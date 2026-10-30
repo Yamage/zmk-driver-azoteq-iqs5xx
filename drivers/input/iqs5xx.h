@@ -240,10 +240,17 @@ struct iqs5xx_data {
     int32_t rot_x_acc;
     int32_t rot_y_acc;
 
-    // Runtime-tunable inertia parameters (initialised from the devicetree
-    // defaults, then overridden by saved settings and the keymap controls).
+    // Runtime-tunable inertia and cursor parameters (initialised from the
+    // devicetree defaults, then overridden by saved settings and keymap controls).
     bool inertia_enabled;          // Master on/off, toggled from the keymap.
     uint16_t inertia_friction_rt;  // Live friction (retained/256 per tick).
     uint16_t inertia_min_speed_rt; // Live min release speed (counts/report).
+    int16_t rotation_deg_rt;       // Live cursor rotation in degrees.
+    uint16_t cursor_scale_pct_rt;  // Live base cursor speed scale in percent (100 = 1.0x).
     struct k_work_delayable inertia_save_work; // Debounced settings save.
+
+    // Touch contact tracking for thumb landing/lift-off anti-jump.
+    uint16_t peak_touch_strength;  // Peak touch strength seen in the current stroke.
+    uint8_t peak_touch_area;       // Peak touch area seen in the current stroke.
+    uint8_t touch_age;             // Number of reports since finger touched down.
 };

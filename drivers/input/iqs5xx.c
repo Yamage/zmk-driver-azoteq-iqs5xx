@@ -6,6 +6,7 @@
 #define DT_DRV_COMPAT azoteq_iqs5xx
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <math.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/device.h>
@@ -29,11 +30,16 @@
 
 LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 
-// Bounds for the runtime-tunable inertia parameters.
+// Bounds for the runtime-tunable inertia and cursor parameters.
 #define IQS5XX_FRICTION_MIN 160
 #define IQS5XX_FRICTION_MAX 252
 #define IQS5XX_MIN_SPEED_MIN 0
 #define IQS5XX_MIN_SPEED_MAX 60
+#define IQS5XX_ROTATION_DEG_MIN (-90)
+#define IQS5XX_ROTATION_DEG_MAX 90
+#define IQS5XX_CURSOR_SCALE_PCT_MIN 40
+#define IQS5XX_CURSOR_SCALE_PCT_MAX 250
+#define IQS5XX_CURSOR_SCALE_PCT_DEFAULT 100
 
 // Single trackpad instance, captured at init so the keymap behavior and the
 // settings handler can reach the runtime inertia state.
@@ -231,27 +237,51 @@ static int32_t iqs5xx_speed_q8(const struct iqs5xx_data *data) {
     return MAX(ax, ay) + MIN(ax, ay) / 2;
 }
 
-static int32_t iqs5xx_accel_gain_q8(const struct iqs5xx_config *config, int32_t speed_q8) {
+static int32_t iqs5xx_accel_gain_q8(const struct iqs5xx_data *data,
+                                    const struct iqs5xx_config *config, int32_t speed_q8) {
     int32_t lo = (int32_t)config->accel_speed_low << 8;
     int32_t hi = (int32_t)config->accel_speed_high << 8;
     int32_t gmin = (int32_t)config->accel_gain_min * 256 / 100;
     int32_t gmax = (int32_t)config->accel_gain_max * 256 / 100;
+    int32_t gain;
     if (speed_q8 >= hi) {
-        return gmax;
+        gain = gmax;
+    } else if (speed_q8 <= lo) {
+        gain = gmin;
+    } else {
+        gain = gmin + (gmax - gmin) * ((speed_q8 - lo) >> 4) / ((hi - lo) >> 4);
     }
-    if (speed_q8 <= lo) {
-        return gmin;
-    }
-    return gmin + (gmax - gmin) * ((speed_q8 - lo) >> 4) / ((hi - lo) >> 4);
+    return gain * (int32_t)data->cursor_scale_pct_rt / 100;
 }
 
-/* ---- Runtime inertia control + flash persistence ---- */
+static void iqs5xx_update_rotation_trig(struct iqs5xx_data *data) {
+    if (data->rotation_deg_rt != 0) {
+        float rad = (float)data->rotation_deg_rt * (3.14159265f / 180.0f);
+        data->rot_cos_q14 = (int32_t)roundf(cosf(rad) * 16384.0f);
+        data->rot_sin_q14 = (int32_t)roundf(sinf(rad) * 16384.0f);
+    } else {
+        data->rot_cos_q14 = 16384;
+        data->rot_sin_q14 = 0;
+    }
+    data->rot_x_acc = 0;
+    data->rot_y_acc = 0;
+}
+
+/* ---- Runtime inertia & cursor control + flash persistence ---- */
 
 #if IS_ENABLED(CONFIG_SETTINGS)
+struct iqs5xx_inertia_persist_v1 {
+    uint8_t enabled;
+    uint16_t friction;
+    uint16_t min_speed;
+};
+
 struct iqs5xx_inertia_persist {
     uint8_t enabled;
     uint16_t friction;
     uint16_t min_speed;
+    int16_t rotation_deg;
+    uint16_t cursor_scale_pct;
 };
 
 static void iqs5xx_inertia_save_work_handler(struct k_work *work) {
@@ -263,6 +293,8 @@ static void iqs5xx_inertia_save_work_handler(struct k_work *work) {
         .enabled = data->inertia_enabled ? 1 : 0,
         .friction = data->inertia_friction_rt,
         .min_speed = data->inertia_min_speed_rt,
+        .rotation_deg = data->rotation_deg_rt,
+        .cursor_scale_pct = data->cursor_scale_pct_rt,
     };
     int rc = settings_save_one("iqs5xx_inertia/state", &p, sizeof(p));
     if (rc) {
@@ -276,18 +308,38 @@ static int iqs5xx_inertia_settings_set(const char *name, size_t len, settings_re
         return -ENOENT;
     }
     struct iqs5xx_data *data = iqs5xx_inertia_data;
-    struct iqs5xx_inertia_persist p;
-    if (len != sizeof(p) || data == NULL) {
+    if (data == NULL) {
         return -EINVAL;
     }
-    int rc = read_cb(cb_arg, &p, sizeof(p));
-    if (rc < 0) {
-        return rc;
+    if (len == sizeof(struct iqs5xx_inertia_persist)) {
+        struct iqs5xx_inertia_persist p;
+        int rc = read_cb(cb_arg, &p, sizeof(p));
+        if (rc < 0) {
+            return rc;
+        }
+        data->inertia_enabled = p.enabled != 0;
+        data->inertia_friction_rt = CLAMP(p.friction, IQS5XX_FRICTION_MIN, IQS5XX_FRICTION_MAX);
+        data->inertia_min_speed_rt = CLAMP(p.min_speed, IQS5XX_MIN_SPEED_MIN, IQS5XX_MIN_SPEED_MAX);
+        data->rotation_deg_rt =
+            CLAMP(p.rotation_deg, IQS5XX_ROTATION_DEG_MIN, IQS5XX_ROTATION_DEG_MAX);
+        data->cursor_scale_pct_rt =
+            CLAMP(p.cursor_scale_pct, IQS5XX_CURSOR_SCALE_PCT_MIN, IQS5XX_CURSOR_SCALE_PCT_MAX);
+        iqs5xx_update_rotation_trig(data);
+        return 0;
     }
-    data->inertia_enabled = p.enabled != 0;
-    data->inertia_friction_rt = CLAMP(p.friction, IQS5XX_FRICTION_MIN, IQS5XX_FRICTION_MAX);
-    data->inertia_min_speed_rt = CLAMP(p.min_speed, IQS5XX_MIN_SPEED_MIN, IQS5XX_MIN_SPEED_MAX);
-    return 0;
+    if (len == sizeof(struct iqs5xx_inertia_persist_v1)) {
+        struct iqs5xx_inertia_persist_v1 p1;
+        int rc = read_cb(cb_arg, &p1, sizeof(p1));
+        if (rc < 0) {
+            return rc;
+        }
+        data->inertia_enabled = p1.enabled != 0;
+        data->inertia_friction_rt = CLAMP(p1.friction, IQS5XX_FRICTION_MIN, IQS5XX_FRICTION_MAX);
+        data->inertia_min_speed_rt =
+            CLAMP(p1.min_speed, IQS5XX_MIN_SPEED_MIN, IQS5XX_MIN_SPEED_MAX);
+        return 0;
+    }
+    return -EINVAL;
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(iqs5xx_inertia, "iqs5xx_inertia", NULL,
@@ -363,8 +415,47 @@ void iqs5xx_inertia_reset(void) {
     data->inertia_enabled = config->inertia_cursor || config->inertia_scroll;
     data->inertia_friction_rt = config->inertia_friction;
     data->inertia_min_speed_rt = config->inertia_min_speed;
-    LOG_INF("Inertia reset to defaults");
+    data->rotation_deg_rt = config->rotation_deg;
+    data->cursor_scale_pct_rt = IQS5XX_CURSOR_SCALE_PCT_DEFAULT;
+    iqs5xx_update_rotation_trig(data);
+    LOG_INF("Trackpad runtime settings reset to defaults");
     iqs5xx_inertia_schedule_save(data);
+}
+
+void iqs5xx_adjust_rotation(int delta_deg) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    int v =
+        CLAMP((int)data->rotation_deg_rt + delta_deg, IQS5XX_ROTATION_DEG_MIN, IQS5XX_ROTATION_DEG_MAX);
+    data->rotation_deg_rt = (int16_t)v;
+    iqs5xx_update_rotation_trig(data);
+    LOG_INF("Trackpad rotation %d deg", v);
+    iqs5xx_inertia_schedule_save(data);
+}
+
+void iqs5xx_adjust_cursor_scale(int delta_pct) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    int v = CLAMP((int)data->cursor_scale_pct_rt + delta_pct, IQS5XX_CURSOR_SCALE_PCT_MIN,
+                  IQS5XX_CURSOR_SCALE_PCT_MAX);
+    data->cursor_scale_pct_rt = (uint16_t)v;
+    LOG_INF("Trackpad cursor scale %d%%", v);
+    iqs5xx_inertia_schedule_save(data);
+}
+
+int iqs5xx_format_status(char *buf, size_t size) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return 0;
+    }
+    return snprintf(buf, size, "[Trackpad] Rot:%ddeg | Spd:%u%% | Inertia:%s (Fric:%u MSpd:%u)\n",
+                    (int)data->rotation_deg_rt, (unsigned)data->cursor_scale_pct_rt,
+                    data->inertia_enabled ? "ON" : "OFF", (unsigned)data->inertia_friction_rt,
+                    (unsigned)data->inertia_min_speed_rt);
 }
 
 static void iqs5xx_work_handler(struct k_work *work) {
@@ -374,7 +465,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
     int ret;
 
     /*
-     * Read the whole contiguous data block (0x000D..0x0015) in a single I2C
+     * Read the contiguous data block (0x000D..0x001C) in a single I2C
      * transaction instead of one read per register. Fewer transactions keep
      * the per-report bus time well inside the RDY comm window, which avoids
      * dropped reports (RR_MISSED) and makes the cursor refresh smoothly.
@@ -382,11 +473,14 @@ static void iqs5xx_work_handler(struct k_work *work) {
      * Block layout (offset from 0x000D = IQS5XX_GESTURE_EVENTS_0):
      *   [0] gesture events 0   [1] gesture events 1
      *   [2] system info 0      [3] system info 1
-     *   [4] number of fingers (unused)
+     *   [4] number of fingers
      *   [5..6] relative X (big-endian, int16)
      *   [7..8] relative Y (big-endian, int16)
+     *   [9..12] absolute X/Y Finger 1 (unused)
+     *   [13..14] touch strength Finger 1 (big-endian, uint16)
+     *   [15] touch area / size Finger 1 (uint8)
      */
-    uint8_t block[9];
+    uint8_t block[16];
     uint8_t block_reg[2] = {IQS5XX_GESTURE_EVENTS_0 >> 8, IQS5XX_GESTURE_EVENTS_0 & 0xFF};
     ret = i2c_write_read_dt(&config->i2c, block_reg, sizeof(block_reg), block, sizeof(block));
     if (ret < 0) {
@@ -400,6 +494,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
     uint8_t sys_info_1 = block[3];
     int16_t rel_x = (int16_t)((block[5] << 8) | block[6]);
     int16_t rel_y = (int16_t)((block[7] << 8) | block[8]);
+    uint16_t touch_strength = ((uint16_t)block[13] << 8) | block[14];
+    uint8_t touch_area = block[15];
 
     // Handle reset indication.
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
@@ -417,7 +513,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->scroll_y_acc = 0;
     }
 
-    // Touch/release edge detection for the inertia glide.
+    // Touch/release edge detection for the inertia glide and thumb contact guard.
     uint8_t fingers = block[4];
     if (fingers > 0 && data->last_fingers == 0) {
         // A new touch instantly stops any ongoing glide.
@@ -426,6 +522,11 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->scroll_y_acc = 0;
         data->accel_x_acc = 0;
         data->accel_y_acc = 0;
+        data->rot_x_acc = 0;
+        data->rot_y_acc = 0;
+        data->peak_touch_strength = touch_strength;
+        data->peak_touch_area = touch_area;
+        data->touch_age = 1;
 
         data->drag_ignore_tap = false;
         if (data->tap_drag_armed &&
@@ -439,6 +540,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->drag_active = true;
         }
         data->tap_drag_armed = false;
+    } else if (fingers > 0) {
+        if (data->touch_age < UINT8_MAX) {
+            data->touch_age++;
+        }
     } else if (fingers == 0 && data->last_fingers > 0 && data->drag_active) {
         input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
         data->drag_active = false;
@@ -447,6 +552,9 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->glide_mode = IQS5XX_GLIDE_NONE;
         data->vel_x = 0;
         data->vel_y = 0;
+        data->peak_touch_strength = 0;
+        data->peak_touch_area = 0;
+        data->touch_age = 0;
     } else if (fingers == 0 && data->last_fingers > 0) {
         // The finger was lifted: start gliding if the release was fast enough.
         bool enabled = data->inertia_enabled &&
@@ -456,9 +564,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
         if (enabled && (abs(data->vel_x) >= min_q8 || abs(data->vel_y) >= min_q8)) {
             data->glide_x_acc = 0;
             data->glide_y_acc = 0;
-            data->glide_gain_q8 = data->glide_mode == IQS5XX_GLIDE_CURSOR
-                                      ? iqs5xx_accel_gain_q8(config, iqs5xx_speed_q8(data))
-                                      : 256;
+            data->glide_gain_q8 =
+                data->glide_mode == IQS5XX_GLIDE_CURSOR
+                    ? iqs5xx_accel_gain_q8(data, config, iqs5xx_speed_q8(data))
+                    : 256;
             k_work_schedule_for_queue(&iqs5xx_work_q, &data->inertia_work,
                                       K_MSEC(config->inertia_tick_ms));
         } else {
@@ -466,6 +575,9 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->vel_x = 0;
             data->vel_y = 0;
         }
+        data->peak_touch_strength = 0;
+        data->peak_touch_area = 0;
+        data->touch_age = 0;
     }
     data->last_fingers = fingers;
 
@@ -563,8 +675,38 @@ static void iqs5xx_work_handler(struct k_work *work) {
             goto end_comm;
         }
     } else if (tp_movement && fingers > 0) {
-        // Skip the lift report (fingers == 0): a thumb rolling off can move the centroid there.
-        if (config->rotation_deg != 0) {
+        /*
+         * Thumb landing & lift-off contact guard:
+         * A broad thumb pad shifts its capacitive centroid both on initial touch-down
+         * (first report as the pad flattens) and during the last 1-2 reports of lift-off
+         * (when contact area / signal strength drops below ~60% of the stroke peak while
+         * peeling off the edge of the thumb). Dropping those reports keeps the cursor
+         * pinned on the target when lifting off and preserves the true flick velocity
+         * in vel_x/vel_y just before lift-off.
+         */
+        if (data->touch_age <= 1) {
+            goto end_comm;
+        }
+        bool peeling_off =
+            (data->peak_touch_strength > 0 &&
+             (uint32_t)touch_strength * 100 < (uint32_t)data->peak_touch_strength * 62) ||
+            (data->peak_touch_area >= 2 &&
+             (uint32_t)touch_area * 100 < (uint32_t)data->peak_touch_area * 65);
+        if (peeling_off) {
+            goto end_comm;
+        }
+        if (touch_strength > data->peak_touch_strength) {
+            data->peak_touch_strength = touch_strength;
+        } else {
+            // Slowly adapt peak downward so shifting to the thumb tip during a long stroke stays valid.
+            data->peak_touch_strength -=
+                (data->peak_touch_strength - touch_strength) >> 4;
+        }
+        if (touch_area > data->peak_touch_area) {
+            data->peak_touch_area = touch_area;
+        }
+
+        if (data->rotation_deg_rt != 0) {
             data->rot_x_acc += rel_x * data->rot_cos_q14 - rel_y * data->rot_sin_q14;
             data->rot_y_acc += rel_x * data->rot_sin_q14 + rel_y * data->rot_cos_q14;
             rel_x = data->rot_x_acc / (1 << 14);
@@ -577,7 +719,7 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->vel_y = (data->vel_y * 3 + ((int32_t)rel_y << 8)) >> 2;
         data->glide_mode = IQS5XX_GLIDE_CURSOR;
 
-        int32_t gain_q8 = iqs5xx_accel_gain_q8(config, iqs5xx_speed_q8(data));
+        int32_t gain_q8 = iqs5xx_accel_gain_q8(data, config, iqs5xx_speed_q8(data));
         data->accel_x_acc += rel_x * gain_q8;
         data->accel_y_acc += rel_y * gain_q8;
         int32_t out_x = data->accel_x_acc / 256;
@@ -585,6 +727,17 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->accel_x_acc -= out_x * 256;
         data->accel_y_acc -= out_y * 256;
         iqs5xx_report_cursor(data, out_x, out_y);
+    } else if (!tp_movement && fingers > 0) {
+        // Finger is held stationary on the pad: decay velocity rapidly so stopping
+        // the thumb before lifting never triggers an unintended inertia glide.
+        data->vel_x >>= 1;
+        data->vel_y >>= 1;
+        if (abs(data->vel_x) < (1 << 8)) {
+            data->vel_x = 0;
+        }
+        if (abs(data->vel_y) < (1 << 8)) {
+            data->vel_y = 0;
+        }
     }
 
 end_comm:
@@ -767,19 +920,16 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init_delayable(&data->ble_flush_work, iqs5xx_ble_flush_work_handler);
     k_work_init(&data->inertia_stop_work, iqs5xx_inertia_stop_work_handler);
 
-    // Seed the runtime inertia parameters from the devicetree defaults; saved
-    // settings (if any) override these at the APPLICATION init phase.
+    // Seed the runtime inertia and cursor parameters from the devicetree defaults;
+    // saved settings (if any) override these at the APPLICATION init phase.
     iqs5xx_inertia_data = data;
     iqs5xx_inertia_config = config;
     data->inertia_enabled = config->inertia_cursor || config->inertia_scroll;
     data->inertia_friction_rt = config->inertia_friction;
     data->inertia_min_speed_rt = config->inertia_min_speed;
-
-    if (config->rotation_deg != 0) {
-        float rad = (float)config->rotation_deg * (3.14159265f / 180.0f);
-        data->rot_cos_q14 = (int32_t)roundf(cosf(rad) * 16384.0f);
-        data->rot_sin_q14 = (int32_t)roundf(sinf(rad) * 16384.0f);
-    }
+    data->rotation_deg_rt = config->rotation_deg;
+    data->cursor_scale_pct_rt = IQS5XX_CURSOR_SCALE_PCT_DEFAULT;
+    iqs5xx_update_rotation_trig(data);
 #if IS_ENABLED(CONFIG_SETTINGS)
     k_work_init_delayable(&data->inertia_save_work, iqs5xx_inertia_save_work_handler);
 #endif
