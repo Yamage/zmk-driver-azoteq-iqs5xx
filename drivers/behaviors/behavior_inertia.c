@@ -14,6 +14,7 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/hci.h>
+#include <zephyr/bluetooth/hci_vs.h>
 #include <drivers/behavior.h>
 #include <zephyr/logging/log.h>
 
@@ -49,6 +50,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define INERTIA_SCALE_DOWN 11
 #define INERTIA_X_SCALE_UP 12
 #define INERTIA_X_SCALE_DOWN 13
+#define INERTIA_RF_ROBUST_TOGGLE 14
 
 /* Tuning step sizes for the adjustable parameters. */
 #define INERTIA_FRICTION_STEP 8
@@ -106,7 +108,7 @@ static const char keymap_guide_ascii[] =
     "[L6 BLE/Studio/Diag]\n"
     "..    ..    ..    ..    Diag  ..    | ->L7  BT0   BT1   BT2   BT3   BT4\n"
     "..    ..    ..    ..    ..    ..    | ..    ..    ..    Guide ..    ..\n"
-    "..    ..    ..    ..    ..    ..    | ..    BTCLR OutTg Unlck ..    ..\n"
+    "..    ..    ..    ..    ..    ..    | ..    BTCLR OutTg Unlck RFMod ..\n"
     "\n"
     "[L7 Touchpad (Fric=glide, MSpd=flick, Rot=angle, Spd=speed, X=horiz%)]\n"
     "..    ..    ..    ..    ..    ..    | ..    Fric+ Fric- MSpd+ MSpd- ..\n"
@@ -451,6 +453,9 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
     case INERTIA_X_SCALE_DOWN:
         iqs5xx_adjust_x_scale(-INERTIA_X_SCALE_STEP_PCT);
         break;
+    case INERTIA_RF_ROBUST_TOGGLE:
+        iqs5xx_toggle_rf_robust_mode();
+        break;
     default:
         LOG_WRN("Unknown inertia action %d", binding->param1);
         return -ENOTSUP;
@@ -490,3 +495,58 @@ ZMK_SUBSCRIPTION(behavior_inertia_layer, zmk_layer_state_changed);
 bool iqs5xx_is_ble_transport(void) {
     return zmk_endpoint_get_selected().transport == ZMK_TRANSPORT_BLE;
 }
+
+#if IS_ENABLED(CONFIG_BT) && defined(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL)
+static void set_handle_tx_power(uint8_t handle_type, uint16_t handle, int8_t dbm) {
+    struct net_buf *buf = bt_hci_cmd_create(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL,
+                                            sizeof(struct bt_hci_cp_vs_write_tx_power_level));
+    if (!buf) {
+        return;
+    }
+    struct bt_hci_cp_vs_write_tx_power_level *cp = net_buf_add(buf, sizeof(*cp));
+    cp->handle_type = handle_type;
+    cp->handle = sys_cpu_to_le16(handle);
+    cp->tx_power_level = dbm;
+
+    struct net_buf *rsp = NULL;
+    if (bt_hci_cmd_send_sync(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL, buf, &rsp) == 0 && rsp != NULL) {
+        net_buf_unref(rsp);
+    }
+}
+
+static void apply_conn_tx_power_cb(struct bt_conn *conn, void *user_data) {
+    int8_t dbm = *(const int8_t *)user_data;
+    struct bt_conn_info info;
+    if (bt_conn_get_info(conn, &info) != 0 || info.state != BT_CONN_STATE_CONNECTED) {
+        return;
+    }
+    uint16_t handle;
+    if (bt_hci_get_conn_handle(conn, &handle) == 0) {
+        set_handle_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_CONN, handle, dbm);
+    }
+}
+
+void iqs5xx_apply_rf_power(bool robust) {
+    int8_t dbm = robust ? 8 : 4;
+    set_handle_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_ADV, 0, dbm);
+    bt_conn_foreach(BT_CONN_TYPE_LE, apply_conn_tx_power_cb, &dbm);
+}
+
+static void rf_conn_connected(struct bt_conn *conn, uint8_t err) {
+    if (err != 0) {
+        return;
+    }
+    uint16_t handle;
+    if (bt_hci_get_conn_handle(conn, &handle) == 0) {
+        int8_t dbm = iqs5xx_is_rf_robust_mode() ? 8 : 4;
+        set_handle_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_CONN, handle, dbm);
+    }
+}
+
+BT_CONN_CB_DEFINE(rf_power_conn_callbacks) = {
+    .connected = rf_conn_connected,
+};
+#else
+void iqs5xx_apply_rf_power(bool robust) { ARG_UNUSED(robust); }
+#endif
+

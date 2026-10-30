@@ -59,8 +59,9 @@ K_THREAD_STACK_DEFINE(iqs5xx_work_q_stack, CONFIG_INPUT_AZOTEQ_IQS5XX_WORKQUEUE_
 static struct k_work_q iqs5xx_work_q;
 static bool iqs5xx_work_q_started;
 
-// Default weak stub when ZMK_BEHAVIOR_INERTIA is not compiled in.
+// Default weak stubs when ZMK_BEHAVIOR_INERTIA is not compiled in.
 __weak bool iqs5xx_is_ble_transport(void) { return false; }
+__weak void iqs5xx_apply_rf_power(bool robust) { ARG_UNUSED(robust); }
 
 static void iqs5xx_emit_cursor_now(struct iqs5xx_data *data) {
     if (data->ble_pending_x == 0 && data->ble_pending_y == 0) {
@@ -97,6 +98,11 @@ static void iqs5xx_report_cursor(struct iqs5xx_data *data, int32_t dx, int32_t d
 
     int64_t elapsed = k_uptime_get() - data->last_ble_emit_ms;
     int64_t min_ms = config->ble_min_report_interval_ms;
+    if (data->rf_robust_mode && min_ms < 16) {
+        // In RF robust mode, widen the coalescing window to 16 ms so that a link retry
+        // on a noisy channel absorbs into the next packet instead of queuing a backlog.
+        min_ms = 16;
+    }
     if (elapsed >= min_ms) {
         k_work_cancel_delayable(&data->ble_flush_work);
         iqs5xx_emit_cursor_now(data);
@@ -302,13 +308,18 @@ struct iqs5xx_inertia_persist {
     uint16_t x_scale_pct;
 };
 
+#define IQS5XX_PERSIST_EN_INERTIA BIT(0)
+#define IQS5XX_PERSIST_EN_RF_ROBUST BIT(1)
+
 static void iqs5xx_inertia_save_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = iqs5xx_inertia_data;
     if (data == NULL) {
         return;
     }
+    uint8_t flags = (data->inertia_enabled ? IQS5XX_PERSIST_EN_INERTIA : 0) |
+                    (data->rf_robust_mode ? IQS5XX_PERSIST_EN_RF_ROBUST : 0);
     struct iqs5xx_inertia_persist p = {
-        .enabled = data->inertia_enabled ? 1 : 0,
+        .enabled = flags,
         .friction = data->inertia_friction_rt,
         .min_speed = data->inertia_min_speed_rt,
         .rotation_deg = data->rotation_deg_rt,
@@ -336,7 +347,8 @@ static int iqs5xx_inertia_settings_set(const char *name, size_t len, settings_re
         if (rc < 0) {
             return rc;
         }
-        data->inertia_enabled = p.enabled != 0;
+        data->inertia_enabled = (p.enabled & IQS5XX_PERSIST_EN_INERTIA) != 0;
+        data->rf_robust_mode = (p.enabled & IQS5XX_PERSIST_EN_RF_ROBUST) != 0;
         data->inertia_friction_rt = CLAMP(p.friction, IQS5XX_FRICTION_MIN, IQS5XX_FRICTION_MAX);
         data->inertia_min_speed_rt = CLAMP(p.min_speed, IQS5XX_MIN_SPEED_MIN, IQS5XX_MIN_SPEED_MAX);
         data->rotation_deg_rt =
@@ -346,6 +358,7 @@ static int iqs5xx_inertia_settings_set(const char *name, size_t len, settings_re
         data->x_scale_pct_rt =
             CLAMP(p.x_scale_pct, IQS5XX_X_SCALE_PCT_MIN, IQS5XX_X_SCALE_PCT_MAX);
         iqs5xx_update_rotation_trig(data);
+        iqs5xx_apply_rf_power(data->rf_robust_mode);
         return 0;
     }
     if (len == sizeof(struct iqs5xx_inertia_persist_v2)) {
@@ -451,14 +464,32 @@ void iqs5xx_inertia_reset(void) {
         return;
     }
     data->inertia_enabled = config->inertia_cursor || config->inertia_scroll;
+    data->rf_robust_mode = false;
     data->inertia_friction_rt = config->inertia_friction;
     data->inertia_min_speed_rt = config->inertia_min_speed;
     data->rotation_deg_rt = config->rotation_deg;
     data->cursor_scale_pct_rt = IQS5XX_CURSOR_SCALE_PCT_DEFAULT;
     data->x_scale_pct_rt = CLAMP(config->x_scale_pct, IQS5XX_X_SCALE_PCT_MIN, IQS5XX_X_SCALE_PCT_MAX);
     iqs5xx_update_rotation_trig(data);
+    iqs5xx_apply_rf_power(false);
     LOG_INF("Trackpad runtime settings reset to defaults");
     iqs5xx_inertia_schedule_save(data);
+}
+
+void iqs5xx_toggle_rf_robust_mode(void) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    data->rf_robust_mode = !data->rf_robust_mode;
+    iqs5xx_apply_rf_power(data->rf_robust_mode);
+    LOG_INF("RF mode: %s", data->rf_robust_mode ? "Robust (+8dBm)" : "Normal (+4dBm)");
+    iqs5xx_inertia_schedule_save(data);
+}
+
+bool iqs5xx_is_rf_robust_mode(void) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    return data != NULL && data->rf_robust_mode;
 }
 
 void iqs5xx_adjust_rotation(int delta_deg) {
@@ -504,10 +535,12 @@ int iqs5xx_format_status(char *buf, size_t size) {
         return 0;
     }
     return snprintf(buf, size,
-                    "[Trackpad] Rot:%ddeg | Spd:%u%% | X:%u%% | Inertia:%s (Fric:%u MSpd:%u)\n",
+                    "[Trackpad] Rot:%ddeg | Spd:%u%% | X:%u%% | RF:%s | Inertia:%s (Fric:%u MSpd:%u)\n",
                     (int)data->rotation_deg_rt, (unsigned)data->cursor_scale_pct_rt,
-                    (unsigned)data->x_scale_pct_rt, data->inertia_enabled ? "ON" : "OFF",
-                    (unsigned)data->inertia_friction_rt, (unsigned)data->inertia_min_speed_rt);
+                    (unsigned)data->x_scale_pct_rt,
+                    data->rf_robust_mode ? "Robust(+8dBm)" : "Normal(+4dBm)",
+                    data->inertia_enabled ? "ON" : "OFF", (unsigned)data->inertia_friction_rt,
+                    (unsigned)data->inertia_min_speed_rt);
 }
 
 static void iqs5xx_work_handler(struct k_work *work) {
@@ -1028,6 +1061,7 @@ static int iqs5xx_init(const struct device *dev) {
     iqs5xx_inertia_data = data;
     iqs5xx_inertia_config = config;
     data->inertia_enabled = config->inertia_cursor || config->inertia_scroll;
+    data->rf_robust_mode = false;
     data->inertia_friction_rt = config->inertia_friction;
     data->inertia_min_speed_rt = config->inertia_min_speed;
     data->rotation_deg_rt = config->rotation_deg;

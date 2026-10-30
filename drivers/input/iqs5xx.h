@@ -259,6 +259,7 @@ struct iqs5xx_data {
     // Runtime-tunable inertia and cursor parameters (initialised from the
     // devicetree defaults, then overridden by saved settings and keymap controls).
     bool inertia_enabled;          // Master on/off, toggled from the keymap.
+    bool rf_robust_mode;           // True = +8 dBm TX power + 16 ms BLE coalescing; False = +4 dBm normal.
     uint16_t inertia_friction_rt;  // Live friction (retained/256 per tick).
     uint16_t inertia_min_speed_rt; // Live min release speed (counts/report).
     int16_t rotation_deg_rt;       // Live cursor rotation in degrees.

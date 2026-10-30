@@ -43,11 +43,20 @@ void iqs5xx_adjust_cursor_scale(int delta_pct);
 // Adjust horizontal (X-axis) cursor scale in percent relative to Y (100 = 1:1, 175 = 1.75x).
 void iqs5xx_adjust_x_scale(int delta_pct);
 
+// Toggle RF robust mode (+8 dBm TX power + anti-backlog BLE coalescing vs +4 dBm normal).
+void iqs5xx_toggle_rf_robust_mode(void);
+
+// True when RF robust mode (+8 dBm) is currently enabled.
+bool iqs5xx_is_rf_robust_mode(void);
+
 // Format a single-line summary of the current trackpad runtime settings.
 int iqs5xx_format_status(char *buf, size_t size);
 
 // True when ZMK's active output endpoint is BLE (implemented in behavior_inertia.c).
 bool iqs5xx_is_ble_transport(void);
+
+// Apply the active RF TX power level to current BLE connections (implemented in behavior_inertia.c).
+void iqs5xx_apply_rf_power(bool robust);
 
 #ifdef __cplusplus
 }
