@@ -225,6 +225,8 @@ static void iqs5xx_glide_clear(struct iqs5xx_data *data) {
     data->glide_mode = IQS5XX_GLIDE_NONE;
     data->vel_x = 0;
     data->vel_y = 0;
+    data->prev_vel_x = 0;
+    data->prev_vel_y = 0;
     data->glide_x_acc = 0;
     data->glide_y_acc = 0;
 }
@@ -233,11 +235,15 @@ static void iqs5xx_inertia_stop_work_handler(struct k_work *work) {
     iqs5xx_glide_clear(CONTAINER_OF(work, struct iqs5xx_data, inertia_stop_work));
 }
 
-// Approximate speed (Q8 counts/report) from the velocity estimate: max + min/2.
-static int32_t iqs5xx_speed_q8(const struct iqs5xx_data *data) {
-    int32_t ax = abs(data->vel_x);
-    int32_t ay = abs(data->vel_y);
+// Approximate speed (Q8 counts/report) from a velocity vector: max + min/2.
+static int32_t iqs5xx_vec_speed_q8(int32_t vx, int32_t vy) {
+    int32_t ax = abs(vx);
+    int32_t ay = abs(vy);
     return MAX(ax, ay) + MIN(ax, ay) / 2;
+}
+
+static int32_t iqs5xx_speed_q8(const struct iqs5xx_data *data) {
+    return iqs5xx_vec_speed_q8(data->vel_x, data->vel_y);
 }
 
 static int32_t iqs5xx_accel_gain_q8(const struct iqs5xx_data *data,
@@ -565,6 +571,9 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->accel_y_acc = 0;
         data->rot_x_acc = 0;
         data->rot_y_acc = 0;
+        data->touch_reports = 1;
+        data->move_reports = 0;
+        data->idle_reports = 0;
 
         data->drag_ignore_tap = false;
         if (data->tap_drag_armed &&
@@ -578,6 +587,10 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->drag_active = true;
         }
         data->tap_drag_armed = false;
+    } else if (fingers > 0) {
+        if (data->touch_reports < UINT8_MAX) {
+            data->touch_reports++;
+        }
     } else if (fingers == 0 && data->last_fingers > 0 && data->drag_active) {
         input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
         data->drag_active = false;
@@ -586,13 +599,48 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->glide_mode = IQS5XX_GLIDE_NONE;
         data->vel_x = 0;
         data->vel_y = 0;
+        data->prev_vel_x = 0;
+        data->prev_vel_y = 0;
     } else if (fingers == 0 && data->last_fingers > 0) {
+        /*
+         * If the finger was already leaving the pad on the final movement report,
+         * that last delta is often smaller than the peak flick delta 1 report earlier.
+         * When the thumb did not pause before lifting (idle_reports <= 1), use the
+         * faster of the last two velocity samples so a quick flick is not lost.
+         */
+        if (data->idle_reports <= 1 &&
+            iqs5xx_vec_speed_q8(data->prev_vel_x, data->prev_vel_y) > iqs5xx_speed_q8(data)) {
+            data->vel_x = data->prev_vel_x;
+            data->vel_y = data->prev_vel_y;
+        }
+        /*
+         * Short-flick rescue: if the thumb brushed across the pad so quickly that
+         * the chip only detected movement on the lift-off frame itself (fingers == 0
+         * with tp_movement && touch_reports <= 6), seed velocity from this frame's
+         * delta instead of dropping it.
+         */
+        if (data->move_reports == 0 && tp_movement && data->touch_reports <= 6 &&
+            (rel_x != 0 || rel_y != 0) && config->inertia_cursor) {
+            int32_t rx = rel_x;
+            int32_t ry = rel_y;
+            if (data->rotation_deg_rt != 0) {
+                rx = (rel_x * data->rot_cos_q14 - rel_y * data->rot_sin_q14) / (1 << 14);
+                ry = (rel_x * data->rot_sin_q14 + rel_y * data->rot_cos_q14) / (1 << 14);
+            }
+            data->vel_x = rx << 8;
+            data->vel_y = ry << 8;
+            data->glide_mode = IQS5XX_GLIDE_CURSOR;
+            int32_t gain_q8 = iqs5xx_accel_gain_q8(data, config, iqs5xx_speed_q8(data));
+            int32_t gain_x_q8 = gain_q8 * (int32_t)data->x_scale_pct_rt / 100;
+            iqs5xx_report_cursor(data, (rx * gain_x_q8) / 256, (ry * gain_q8) / 256);
+        }
+
         // The finger was lifted: start gliding if the release was fast enough.
         bool enabled = data->inertia_enabled &&
                        ((data->glide_mode == IQS5XX_GLIDE_CURSOR && config->inertia_cursor) ||
                         (data->glide_mode == IQS5XX_GLIDE_SCROLL && config->inertia_scroll));
         int32_t min_q8 = (int32_t)data->inertia_min_speed_rt << 8;
-        if (enabled && (abs(data->vel_x) >= min_q8 || abs(data->vel_y) >= min_q8)) {
+        if (enabled && iqs5xx_speed_q8(data) >= min_q8) {
             data->glide_x_acc = 0;
             data->glide_y_acc = 0;
             data->glide_gain_q8 =
@@ -606,6 +654,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->vel_x = 0;
             data->vel_y = 0;
         }
+        data->prev_vel_x = 0;
+        data->prev_vel_y = 0;
     }
     data->last_fingers = fingers;
 
@@ -712,9 +762,26 @@ static void iqs5xx_work_handler(struct k_work *work) {
             data->rot_x_acc -= rel_x * (1 << 14);
             data->rot_y_acc -= rel_y * (1 << 14);
         }
-        // Velocity (raw counts) drives both the acceleration gain and the glide.
-        data->vel_x = (data->vel_x * 3 + ((int32_t)rel_x << 8)) >> 2;
-        data->vel_y = (data->vel_y * 3 + ((int32_t)rel_y << 8)) >> 2;
+        /*
+         * Velocity (raw counts) drives both the acceleration gain and the glide.
+         * On the first 1-2 movement reports of a fresh touch, seed velocity directly
+         * from the instantaneous delta so a quick, trackball-like flick reaches full
+         * speed immediately instead of losing 56%-75% of its speed to the 4-frame EMA
+         * warm-up. From the 3rd report onward, smooth with a 50/50 EMA.
+         */
+        data->prev_vel_x = data->vel_x;
+        data->prev_vel_y = data->vel_y;
+        if (data->move_reports < 2) {
+            data->vel_x = (int32_t)rel_x << 8;
+            data->vel_y = (int32_t)rel_y << 8;
+        } else {
+            data->vel_x = (data->vel_x + ((int32_t)rel_x << 8)) >> 1;
+            data->vel_y = (data->vel_y + ((int32_t)rel_y << 8)) >> 1;
+        }
+        if (data->move_reports < UINT8_MAX) {
+            data->move_reports++;
+        }
+        data->idle_reports = 0;
         data->glide_mode = IQS5XX_GLIDE_CURSOR;
 
         int32_t gain_q8 = iqs5xx_accel_gain_q8(data, config, iqs5xx_speed_q8(data));
@@ -727,15 +794,29 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->accel_y_acc -= out_y * 256;
         iqs5xx_report_cursor(data, out_x, out_y);
     } else if (!tp_movement && fingers > 0) {
-        // Finger is held stationary on the pad: decay velocity rapidly so stopping
-        // the thumb before lifting never triggers an unintended inertia glide.
-        data->vel_x >>= 1;
-        data->vel_y >>= 1;
-        if (abs(data->vel_x) < (1 << 8)) {
-            data->vel_x = 0;
+        /*
+         * Finger is held stationary on the pad:
+         * - Wait 1 report (5 ms) before decaying so a single zero-delta report right
+         *   as the thumb lifts off after a quick flick does not halve the release speed.
+         * - Once stationary for >= 2 reports (>= 10 ms), decay velocity rapidly so
+         *   stopping the thumb before lifting never triggers an unintended glide.
+         */
+        if (data->idle_reports < UINT8_MAX) {
+            data->idle_reports++;
         }
-        if (abs(data->vel_y) < (1 << 8)) {
-            data->vel_y = 0;
+        if (data->idle_reports >= 2) {
+            data->vel_x >>= 1;
+            data->vel_y >>= 1;
+            data->prev_vel_x = data->vel_x;
+            data->prev_vel_y = data->vel_y;
+            if (abs(data->vel_x) < (1 << 8)) {
+                data->vel_x = 0;
+                data->prev_vel_x = 0;
+            }
+            if (abs(data->vel_y) < (1 << 8)) {
+                data->vel_y = 0;
+                data->prev_vel_y = 0;
+            }
         }
     }
 

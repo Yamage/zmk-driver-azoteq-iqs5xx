@@ -214,6 +214,11 @@ struct iqs5xx_data {
     struct k_work_delayable inertia_work;
     int32_t vel_x;       // Q8 fixed-point velocity estimate (counts/report).
     int32_t vel_y;
+    int32_t prev_vel_x;  // Previous report's velocity (protects flick speed across the last pre-lift report).
+    int32_t prev_vel_y;
+    uint8_t touch_reports;    // Number of reports in the current touch contact.
+    uint8_t move_reports;     // Number of movement reports in the current touch contact.
+    uint8_t idle_reports;     // Consecutive stationary reports while finger is down.
     int32_t glide_x_acc; // Q8 fractional carry for emitted glide movement.
     int32_t glide_y_acc;
     uint8_t glide_mode;  // IQS5XX_GLIDE_* : last motion kind, used while gliding.
