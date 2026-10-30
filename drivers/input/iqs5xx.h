@@ -181,6 +181,9 @@ struct iqs5xx_config {
     uint16_t accel_speed_low;
     uint16_t accel_speed_high;
 
+    // Horizontal (X-axis) cursor multiplier in percent (100 = 1:1, 175 = 1.75x).
+    uint16_t x_scale_pct;
+
     // Minimum interval in ms between mouse reports when outputting over BLE (0 = no coalescing).
     uint16_t ble_min_report_interval_ms;
 };
@@ -247,5 +250,6 @@ struct iqs5xx_data {
     uint16_t inertia_min_speed_rt; // Live min release speed (counts/report).
     int16_t rotation_deg_rt;       // Live cursor rotation in degrees.
     uint16_t cursor_scale_pct_rt;  // Live base cursor speed scale in percent (100 = 1.0x).
+    uint16_t x_scale_pct_rt;       // Live horizontal (X-axis) multiplier in percent (175 = 1.75x).
     struct k_work_delayable inertia_save_work; // Debounced settings save.
 };

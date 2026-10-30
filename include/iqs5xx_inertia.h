@@ -40,6 +40,9 @@ void iqs5xx_adjust_rotation(int delta_deg);
 // Adjust base cursor speed scale in percent (100 = 1.0x).
 void iqs5xx_adjust_cursor_scale(int delta_pct);
 
+// Adjust horizontal (X-axis) cursor scale in percent relative to Y (100 = 1:1, 175 = 1.75x).
+void iqs5xx_adjust_x_scale(int delta_pct);
+
 // Format a single-line summary of the current trackpad runtime settings.
 int iqs5xx_format_status(char *buf, size_t size);
 

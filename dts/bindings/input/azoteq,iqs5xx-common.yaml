@@ -181,6 +181,15 @@ properties:
       Finger speed (counts per report) from which accel-gain-max applies.
     default: 0
 
+  x-scale-pct:
+    type: int
+    description: |
+      Horizontal (X-axis) cursor speed multiplier in percent relative to Y,
+      applied after rotation-deg (including during inertia glide). Compensates
+      for the thumb's smaller horizontal travel vs vertical extension so drawing
+      a circle with the thumb produces a round circle on screen (e.g. 175 = 1.75x).
+    default: 100
+
   ble-min-report-interval-ms:
     type: int
     description: |

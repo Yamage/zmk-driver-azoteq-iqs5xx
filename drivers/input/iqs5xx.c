@@ -40,6 +40,8 @@ LOG_MODULE_REGISTER(iqs5xx, CONFIG_INPUT_LOG_LEVEL);
 #define IQS5XX_CURSOR_SCALE_PCT_MIN 40
 #define IQS5XX_CURSOR_SCALE_PCT_MAX 250
 #define IQS5XX_CURSOR_SCALE_PCT_DEFAULT 100
+#define IQS5XX_X_SCALE_PCT_MIN 50
+#define IQS5XX_X_SCALE_PCT_MAX 300
 
 // Single trackpad instance, captured at init so the keymap behavior and the
 // settings handler can reach the runtime inertia state.
@@ -162,7 +164,8 @@ static void iqs5xx_inertia_work_handler(struct k_work *work) {
     int32_t step_y = ((data->vel_y * data->glide_gain_q8) >> 8) * config->inertia_tick_ms / report_ms;
 
     if (data->glide_mode == IQS5XX_GLIDE_CURSOR) {
-        data->glide_x_acc += step_x;
+        int32_t step_x_scaled = step_x * (int32_t)data->x_scale_pct_rt / 100;
+        data->glide_x_acc += step_x_scaled;
         data->glide_y_acc += step_y;
         int32_t out_x = data->glide_x_acc >> 8;
         int32_t out_y = data->glide_y_acc >> 8;
@@ -276,12 +279,21 @@ struct iqs5xx_inertia_persist_v1 {
     uint16_t min_speed;
 };
 
+struct iqs5xx_inertia_persist_v2 {
+    uint8_t enabled;
+    uint16_t friction;
+    uint16_t min_speed;
+    int16_t rotation_deg;
+    uint16_t cursor_scale_pct;
+};
+
 struct iqs5xx_inertia_persist {
     uint8_t enabled;
     uint16_t friction;
     uint16_t min_speed;
     int16_t rotation_deg;
     uint16_t cursor_scale_pct;
+    uint16_t x_scale_pct;
 };
 
 static void iqs5xx_inertia_save_work_handler(struct k_work *work) {
@@ -295,6 +307,7 @@ static void iqs5xx_inertia_save_work_handler(struct k_work *work) {
         .min_speed = data->inertia_min_speed_rt,
         .rotation_deg = data->rotation_deg_rt,
         .cursor_scale_pct = data->cursor_scale_pct_rt,
+        .x_scale_pct = data->x_scale_pct_rt,
     };
     int rc = settings_save_one("iqs5xx_inertia/state", &p, sizeof(p));
     if (rc) {
@@ -324,6 +337,25 @@ static int iqs5xx_inertia_settings_set(const char *name, size_t len, settings_re
             CLAMP(p.rotation_deg, IQS5XX_ROTATION_DEG_MIN, IQS5XX_ROTATION_DEG_MAX);
         data->cursor_scale_pct_rt =
             CLAMP(p.cursor_scale_pct, IQS5XX_CURSOR_SCALE_PCT_MIN, IQS5XX_CURSOR_SCALE_PCT_MAX);
+        data->x_scale_pct_rt =
+            CLAMP(p.x_scale_pct, IQS5XX_X_SCALE_PCT_MIN, IQS5XX_X_SCALE_PCT_MAX);
+        iqs5xx_update_rotation_trig(data);
+        return 0;
+    }
+    if (len == sizeof(struct iqs5xx_inertia_persist_v2)) {
+        struct iqs5xx_inertia_persist_v2 p2;
+        int rc = read_cb(cb_arg, &p2, sizeof(p2));
+        if (rc < 0) {
+            return rc;
+        }
+        data->inertia_enabled = p2.enabled != 0;
+        data->inertia_friction_rt = CLAMP(p2.friction, IQS5XX_FRICTION_MIN, IQS5XX_FRICTION_MAX);
+        data->inertia_min_speed_rt =
+            CLAMP(p2.min_speed, IQS5XX_MIN_SPEED_MIN, IQS5XX_MIN_SPEED_MAX);
+        data->rotation_deg_rt =
+            CLAMP(p2.rotation_deg, IQS5XX_ROTATION_DEG_MIN, IQS5XX_ROTATION_DEG_MAX);
+        data->cursor_scale_pct_rt =
+            CLAMP(p2.cursor_scale_pct, IQS5XX_CURSOR_SCALE_PCT_MIN, IQS5XX_CURSOR_SCALE_PCT_MAX);
         iqs5xx_update_rotation_trig(data);
         return 0;
     }
@@ -417,6 +449,7 @@ void iqs5xx_inertia_reset(void) {
     data->inertia_min_speed_rt = config->inertia_min_speed;
     data->rotation_deg_rt = config->rotation_deg;
     data->cursor_scale_pct_rt = IQS5XX_CURSOR_SCALE_PCT_DEFAULT;
+    data->x_scale_pct_rt = CLAMP(config->x_scale_pct, IQS5XX_X_SCALE_PCT_MIN, IQS5XX_X_SCALE_PCT_MAX);
     iqs5xx_update_rotation_trig(data);
     LOG_INF("Trackpad runtime settings reset to defaults");
     iqs5xx_inertia_schedule_save(data);
@@ -447,15 +480,28 @@ void iqs5xx_adjust_cursor_scale(int delta_pct) {
     iqs5xx_inertia_schedule_save(data);
 }
 
+void iqs5xx_adjust_x_scale(int delta_pct) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    int v = CLAMP((int)data->x_scale_pct_rt + delta_pct, IQS5XX_X_SCALE_PCT_MIN,
+                  IQS5XX_X_SCALE_PCT_MAX);
+    data->x_scale_pct_rt = (uint16_t)v;
+    LOG_INF("Trackpad X scale %d%%", v);
+    iqs5xx_inertia_schedule_save(data);
+}
+
 int iqs5xx_format_status(char *buf, size_t size) {
     struct iqs5xx_data *data = iqs5xx_inertia_data;
     if (data == NULL) {
         return 0;
     }
-    return snprintf(buf, size, "[Trackpad] Rot:%ddeg | Spd:%u%% | Inertia:%s (Fric:%u MSpd:%u)\n",
+    return snprintf(buf, size,
+                    "[Trackpad] Rot:%ddeg | Spd:%u%% | X:%u%% | Inertia:%s (Fric:%u MSpd:%u)\n",
                     (int)data->rotation_deg_rt, (unsigned)data->cursor_scale_pct_rt,
-                    data->inertia_enabled ? "ON" : "OFF", (unsigned)data->inertia_friction_rt,
-                    (unsigned)data->inertia_min_speed_rt);
+                    (unsigned)data->x_scale_pct_rt, data->inertia_enabled ? "ON" : "OFF",
+                    (unsigned)data->inertia_friction_rt, (unsigned)data->inertia_min_speed_rt);
 }
 
 static void iqs5xx_work_handler(struct k_work *work) {
@@ -672,7 +718,8 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->glide_mode = IQS5XX_GLIDE_CURSOR;
 
         int32_t gain_q8 = iqs5xx_accel_gain_q8(data, config, iqs5xx_speed_q8(data));
-        data->accel_x_acc += rel_x * gain_q8;
+        int32_t gain_x_q8 = gain_q8 * (int32_t)data->x_scale_pct_rt / 100;
+        data->accel_x_acc += rel_x * gain_x_q8;
         data->accel_y_acc += rel_y * gain_q8;
         int32_t out_x = data->accel_x_acc / 256;
         int32_t out_y = data->accel_y_acc / 256;
@@ -881,6 +928,7 @@ static int iqs5xx_init(const struct device *dev) {
     data->inertia_min_speed_rt = config->inertia_min_speed;
     data->rotation_deg_rt = config->rotation_deg;
     data->cursor_scale_pct_rt = IQS5XX_CURSOR_SCALE_PCT_DEFAULT;
+    data->x_scale_pct_rt = CLAMP(config->x_scale_pct, IQS5XX_X_SCALE_PCT_MIN, IQS5XX_X_SCALE_PCT_MAX);
     iqs5xx_update_rotation_trig(data);
 #if IS_ENABLED(CONFIG_SETTINGS)
     k_work_init_delayable(&data->inertia_save_work, iqs5xx_inertia_save_work_handler);
@@ -1000,6 +1048,7 @@ static int iqs5xx_init(const struct device *dev) {
         .accel_gain_max = DT_INST_PROP_OR(n, accel_gain_max, 100),                                 \
         .accel_speed_low = DT_INST_PROP_OR(n, accel_speed_low, 0),                                 \
         .accel_speed_high = DT_INST_PROP_OR(n, accel_speed_high, 0),                               \
+        .x_scale_pct = DT_INST_PROP_OR(n, x_scale_pct, 100),                                       \
         .ble_min_report_interval_ms = DT_INST_PROP_OR(n, ble_min_report_interval_ms, 0),           \
         .tap_distance = DT_INST_PROP_OR(n, tap_distance, 0),                                       \
         .touch_threshold_increase = DT_INST_PROP_OR(n, touch_threshold_increase, 0),               \
