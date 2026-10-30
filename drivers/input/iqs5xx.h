@@ -19,8 +19,16 @@
 
 #define IQS5XX_END_COMM_WINDOW 0xEEEE
 
-// Active mode report rate, in ms (2 bytes wide). Lower = faster/smoother.
+// Report rates (ms, 2 bytes each) and mode timeouts (in 500 ms units, 1 byte each).
 #define IQS5XX_ACTIVE_REPORT_RATE 0x057A
+#define IQS5XX_IDLE_TOUCH_REPORT_RATE 0x057C
+#define IQS5XX_IDLE_REPORT_RATE 0x057E
+#define IQS5XX_LP1_REPORT_RATE 0x0580
+#define IQS5XX_LP2_REPORT_RATE 0x0582
+#define IQS5XX_ACTIVE_TIMEOUT 0x0584
+#define IQS5XX_IDLE_TOUCH_TIMEOUT 0x0585
+#define IQS5XX_IDLE_TIMEOUT 0x0586
+#define IQS5XX_LP1_TIMEOUT 0x0587
 
 #define IQS5XX_SYSTEM_CONTROL_0 0x0431
 // System Control 0 bits.

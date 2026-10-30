@@ -853,6 +853,21 @@ static int iqs5xx_setup_device(const struct device *dev) {
         }
     }
 
+    // Power-saving report rates and fast transitions to Idle / LP1 / LP2 when untouched:
+    // - Idle Touch rate: 25 ms (40 Hz) while finger rests without moving
+    // - Idle rate: 30 ms (33 Hz) just after release for instant wake
+    // - LP1 rate: 50 ms (20 Hz), LP2 rate: 100 ms (10 Hz) for deep idle
+    // - Timeouts (in 500 ms units): Active->Idle after 1 s (2), Idle->LP1 after 2 s (4),
+    //   LP1->LP2 after 10 s (20).
+    iqs5xx_write_reg16(dev, IQS5XX_IDLE_TOUCH_REPORT_RATE, 25);
+    iqs5xx_write_reg16(dev, IQS5XX_IDLE_REPORT_RATE, 30);
+    iqs5xx_write_reg16(dev, IQS5XX_LP1_REPORT_RATE, 50);
+    iqs5xx_write_reg16(dev, IQS5XX_LP2_REPORT_RATE, 100);
+    iqs5xx_write_reg8(dev, IQS5XX_ACTIVE_TIMEOUT, 2);
+    iqs5xx_write_reg8(dev, IQS5XX_IDLE_TOUCH_TIMEOUT, 4);
+    iqs5xx_write_reg8(dev, IQS5XX_IDLE_TIMEOUT, 4);
+    iqs5xx_write_reg8(dev, IQS5XX_LP1_TIMEOUT, 20);
+
     ret = iqs5xx_write_reg8(dev, IQS5XX_BOTTOM_BETA, config->bottom_beta);
     if (ret < 0) {
         LOG_ERR("Failed to set bottom beta: %d", ret);
