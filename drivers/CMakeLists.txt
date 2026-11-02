@@ -1,3 +1,4 @@
 add_subdirectory_ifdef(CONFIG_INPUT input)
 add_subdirectory_ifdef(CONFIG_ZMK_BEHAVIOR_INERTIA behaviors)
+add_subdirectory_ifdef(CONFIG_ZMK_INPUT_PROCESSOR_SCROLL_SPEED input_processors)
 add_subdirectory_ifdef(CONFIG_ZMK_CRASH_GUARD crash_guard)

@@ -1,0 +1,8 @@
+config ZMK_INPUT_PROCESSOR_SCROLL_SPEED
+    bool "Per-host runtime scroll speed input processor"
+    default y
+    depends on DT_HAS_ZMK_INPUT_PROCESSOR_SCROLL_SPEED_ENABLED
+    depends on ZMK_POINTING
+    help
+      Scales scroll events by a percentage kept separately for USB and for
+      each BLE profile, adjustable at runtime and persisted to flash.

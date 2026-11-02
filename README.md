@@ -66,6 +66,30 @@ of its RAM: reserve a block outside Zephyr's RAM and point the chosen
 &sram0 { reg = <0x20000000 DT_SIZE_K(240)>; };
 ```
 
+## Per-host scroll speed (optional)
+
+The `zmk,input-processor-scroll-speed` input processor scales scroll events by a
+percentage kept separately for USB and for each BLE profile (default 100%,
+10% to 300%), so a host whose apps scroll a long way per wheel notch (e.g. a
+phone on its own BLE profile) can be slowed down without affecting the others.
+The values persist to flash. Adjust the active host with the
+`zmk,behavior-inertia` actions `15` (+10%) and `16` (-10%); the reset action
+(`5`) also restores the active host to 100%, and `INERTIA_BLE_DIAG` reports all
+values.
+
+```
+/ {
+    scroll_speed: scroll_speed {
+        compatible = "zmk,input-processor-scroll-speed";
+        #input-processor-cells = <0>;
+        track-remainders;
+    };
+};
+
+/* Put it after the processor that produces the scroll events. */
+input-processors = <&zip_xy_to_scroll_mapper>, <&scroll_speed>;
+```
+
 ## Usage
 
 - Specify a node with the "azoteq,iqs5xx" compatible inside an i2c node in your keyboard overlay.

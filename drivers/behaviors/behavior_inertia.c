@@ -33,6 +33,10 @@
 #include <zmk_crash_guard.h>
 #endif
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_SCROLL_SPEED)
+#include <zmk_scroll_speed.h>
+#endif
+
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /* Action codes carried in the behavior binding parameter. */
@@ -51,6 +55,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define INERTIA_X_SCALE_UP 12
 #define INERTIA_X_SCALE_DOWN 13
 #define INERTIA_RF_ROBUST_TOGGLE 14
+#define INERTIA_SCROLL_SPEED_UP 15
+#define INERTIA_SCROLL_SPEED_DOWN 16
 
 /* Tuning step sizes for the adjustable parameters. */
 #define INERTIA_FRICTION_STEP 8
@@ -58,9 +64,10 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define INERTIA_ROT_STEP_DEG 5
 #define INERTIA_SCALE_STEP_PCT 10
 #define INERTIA_X_SCALE_STEP_PCT 10
+#define INERTIA_SCROLL_SPEED_STEP_PCT 10
 #define DIAG_TYPE_STEP_MS 12
 
-static char diag_buf[512];
+static char diag_buf[640];
 static const char *diag_active_text;
 static size_t diag_pos;
 static uint32_t diag_active_keycode;
@@ -110,10 +117,10 @@ static const char keymap_guide_ascii[] =
     "..    ..    ..    ..    ..    ..    | ..    ..    ..    Guide ..    ..\n"
     "..    ..    ..    ..    ..    ..    | ..    BTCLR OutTg Unlck RFMod ..\n"
     "\n"
-    "[L7 Touchpad (Fric=glide, MSpd=flick, Rot=angle, Spd=speed, X=horiz%)]\n"
+    "[L7 Touchpad (Fric=glide, MSpd=flick, Rot=angle, Spd=speed, X=horiz%, Scr=scroll/host)]\n"
     "..    ..    ..    ..    ..    ..    | ..    Fric+ Fric- MSpd+ MSpd- ..\n"
     "..    ..    ..    ..    ..    ..    | ..    Inert Rot+  Rot-  Spd+  Spd-\n"
-    "..    ..    ..    ..    ..    ..    | ..    Reset X+    X-    ..    ..\n";
+    "..    ..    ..    ..    ..    ..    | ..    Reset X+    X-    Scr+  Scr-\n";
 
 static uint32_t char_to_zmk_keycode(char c) {
     if (c >= 'a' && c <= 'z') {
@@ -337,6 +344,12 @@ static void build_ble_diag_report(char *buf, size_t size) {
         off += iqs5xx_format_status(buf + off, size - off);
     }
 
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_SCROLL_SPEED)
+    if (off > 0 && (size_t)off < size) {
+        off += zmk_scroll_speed_format_status(buf + off, size - off);
+    }
+#endif
+
 #if IS_ENABLED(CONFIG_ZMK_CRASH_GUARD)
     if (off > 0 && (size_t)off < size) {
         off += zmk_crash_guard_format(buf + off, size - off);
@@ -428,6 +441,9 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
         break;
     case INERTIA_RESET:
         iqs5xx_inertia_reset();
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_SCROLL_SPEED)
+        zmk_scroll_speed_reset_current();
+#endif
         break;
     case INERTIA_BLE_DIAG:
         start_ble_diag_typing();
@@ -456,6 +472,14 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
     case INERTIA_RF_ROBUST_TOGGLE:
         iqs5xx_toggle_rf_robust_mode();
         break;
+#if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_SCROLL_SPEED)
+    case INERTIA_SCROLL_SPEED_UP:
+        zmk_scroll_speed_adjust(INERTIA_SCROLL_SPEED_STEP_PCT);
+        break;
+    case INERTIA_SCROLL_SPEED_DOWN:
+        zmk_scroll_speed_adjust(-INERTIA_SCROLL_SPEED_STEP_PCT);
+        break;
+#endif
     default:
         LOG_WRN("Unknown inertia action %d", binding->param1);
         return -ENOTSUP;

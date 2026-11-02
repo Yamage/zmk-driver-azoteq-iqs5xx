@@ -1,0 +1,12 @@
+# Copyright (c) 2025 Mariano Uvalle
+# SPDX-License-Identifier: MIT
+
+description: |
+  Scales scroll (INPUT_REL_WHEEL / INPUT_REL_HWHEEL) events by a runtime
+  percentage kept separately for USB and for each BLE profile. Adjust it with
+  the zmk,behavior-inertia scroll speed actions; values persist to flash.
+  Add `track-remainders;` so slow scrolling is not lost to rounding.
+
+compatible: "zmk,input-processor-scroll-speed"
+
+include: ip_zero_param.yaml
