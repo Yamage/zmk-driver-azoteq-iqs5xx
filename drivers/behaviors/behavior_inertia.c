@@ -95,7 +95,7 @@ static const char keymap_guide_ascii[] =
     "[L1 Sym/Num/Arrow]\n"
     "!     @     #     $     %     ..    | SHFT  ^     &     *     '     =\n"
     "1     2     3     4     5     ..    | }/L3  Left  Down  Up    Right :\n"
-    "6     7     8     9     0     ..    | ENT   -     +     (     )     ?\n"
+    "6/Sft 7/Ctl 8/Alt 9     0     ..    | ENT   -     +     (     )     ?\n"
     "\n"
     "[L2 Edit/NumPad/IME]\n"
     "->L6  ..    ..    ..    ..    CTRL  | ALT   ..    S+INS DEL   BSPC  ESC\n"
