@@ -12,6 +12,9 @@
 #ifndef ZMK_DRIVER_AZOTEQ_IQS5XX_INERTIA_H_
 #define ZMK_DRIVER_AZOTEQ_IQS5XX_INERTIA_H_
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -57,6 +60,12 @@ bool iqs5xx_is_ble_transport(void);
 
 // Apply the active RF TX power level to current BLE connections (implemented in behavior_inertia.c).
 void iqs5xx_apply_rf_power(bool robust);
+
+// Host BLE connection interval in ms, rounded up; 0 when no host is connected over BLE.
+int iqs5xx_ble_conn_interval_ms(void);
+
+// Reports waiting in ZMK's BLE mouse report queue (zmk_hog_mouse_msgq).
+uint32_t iqs5xx_ble_mouse_queue_used(void);
 
 #ifdef __cplusplus
 }

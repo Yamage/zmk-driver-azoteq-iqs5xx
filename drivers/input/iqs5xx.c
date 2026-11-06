@@ -62,6 +62,13 @@ static bool iqs5xx_work_q_started;
 // Default weak stubs when ZMK_BEHAVIOR_INERTIA is not compiled in.
 __weak bool iqs5xx_is_ble_transport(void) { return false; }
 __weak void iqs5xx_apply_rf_power(bool robust) { ARG_UNUSED(robust); }
+__weak int iqs5xx_ble_conn_interval_ms(void) { return 0; }
+__weak uint32_t iqs5xx_ble_mouse_queue_used(void) { return 0; }
+
+// Longest time a BLE cursor report waits for the ZMK mouse queue to drain. ZMK leaves
+// reports in that queue when the host disconnects and drains it only when a new report is
+// put, so waiting forever would freeze the cursor after a reconnect.
+#define IQS5XX_BLE_MAX_DEFER_MS 100
 
 static void iqs5xx_emit_cursor_now(struct iqs5xx_data *data) {
     if (data->ble_pending_x == 0 && data->ble_pending_y == 0) {
@@ -76,35 +83,62 @@ static void iqs5xx_emit_cursor_now(struct iqs5xx_data *data) {
     input_report_rel(data->dev, INPUT_REL_Y, out_y, true, K_FOREVER);
 }
 
+/*
+ * Send the summed cursor deltas, or keep summing and retry later. Over BLE at most one report
+ * is sent per host connection interval, and none while the previous report still waits in the
+ * ZMK mouse queue: a full queue would block the input thread for 100 ms and drop a report.
+ */
+static void iqs5xx_send_cursor(struct iqs5xx_data *data) {
+    const struct iqs5xx_config *config = data->dev->config;
+
+    if (config->ble_min_report_interval_ms == 0 || !iqs5xx_is_ble_transport()) {
+        k_work_cancel_delayable(&data->ble_flush_work);
+        data->ble_defer_start_ms = 0;
+        iqs5xx_emit_cursor_now(data);
+        return;
+    }
+    if (data->ble_pending_x == 0 && data->ble_pending_y == 0) {
+        data->ble_defer_start_ms = 0;
+        return;
+    }
+
+    int64_t now = k_uptime_get();
+    int64_t interval = MAX((int)config->ble_min_report_interval_ms, iqs5xx_ble_conn_interval_ms());
+    int64_t elapsed = now - data->last_ble_emit_ms;
+    if (elapsed < interval) {
+        k_work_schedule_for_queue(&iqs5xx_work_q, &data->ble_flush_work,
+                                  K_MSEC(interval - elapsed));
+        return;
+    }
+
+    if (iqs5xx_ble_mouse_queue_used() > 0) {
+        if (data->ble_defer_start_ms == 0) {
+            data->ble_defer_start_ms = now;
+        }
+        if (now - data->ble_defer_start_ms < IQS5XX_BLE_MAX_DEFER_MS) {
+            k_work_schedule_for_queue(&iqs5xx_work_q, &data->ble_flush_work, K_MSEC(interval));
+            return;
+        }
+    }
+
+    data->ble_defer_start_ms = 0;
+    k_work_cancel_delayable(&data->ble_flush_work);
+    iqs5xx_emit_cursor_now(data);
+}
+
 static void iqs5xx_ble_flush_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct iqs5xx_data *data = CONTAINER_OF(dwork, struct iqs5xx_data, ble_flush_work);
-    iqs5xx_emit_cursor_now(data);
+    iqs5xx_send_cursor(data);
 }
 
 static void iqs5xx_report_cursor(struct iqs5xx_data *data, int32_t dx, int32_t dy) {
     if (dx == 0 && dy == 0) {
         return;
     }
-    const struct iqs5xx_config *config = data->dev->config;
     data->ble_pending_x += dx;
     data->ble_pending_y += dy;
-
-    if (config->ble_min_report_interval_ms == 0 || !iqs5xx_is_ble_transport()) {
-        k_work_cancel_delayable(&data->ble_flush_work);
-        iqs5xx_emit_cursor_now(data);
-        return;
-    }
-
-    int64_t elapsed = k_uptime_get() - data->last_ble_emit_ms;
-    int64_t min_ms = config->ble_min_report_interval_ms;
-    if (elapsed >= min_ms) {
-        k_work_cancel_delayable(&data->ble_flush_work);
-        iqs5xx_emit_cursor_now(data);
-    } else {
-        k_work_schedule_for_queue(&iqs5xx_work_q, &data->ble_flush_work,
-                                  K_MSEC(min_ms - elapsed));
-    }
+    iqs5xx_send_cursor(data);
 }
 
 static int iqs5xx_write_reg16(const struct device *dev, uint16_t reg, uint16_t val) {
@@ -221,8 +255,7 @@ static void iqs5xx_inertia_work_handler(struct k_work *work) {
 
 static void iqs5xx_glide_clear(struct iqs5xx_data *data) {
     k_work_cancel_delayable(&data->inertia_work);
-    k_work_cancel_delayable(&data->ble_flush_work);
-    iqs5xx_emit_cursor_now(data);
+    iqs5xx_send_cursor(data);
     data->glide_mode = IQS5XX_GLIDE_NONE;
     data->vel_x = 0;
     data->vel_y = 0;

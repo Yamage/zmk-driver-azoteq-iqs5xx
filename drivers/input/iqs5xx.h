@@ -238,6 +238,7 @@ struct iqs5xx_data {
     int32_t ble_pending_x; // Coalesced cursor deltas waiting for the next BLE send window.
     int32_t ble_pending_y;
     int64_t last_ble_emit_ms;
+    int64_t ble_defer_start_ms; // Uptime when a BLE report was first held back for a busy queue (0 = none).
     struct k_work_delayable ble_flush_work;
     uint8_t last_fingers; // Finger count from the previous report (touch/release edge).
 

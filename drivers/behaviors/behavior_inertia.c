@@ -67,7 +67,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define INERTIA_SCROLL_SPEED_STEP_PCT 10
 #define DIAG_TYPE_STEP_MS 12
 
-static char diag_buf[640];
+static char diag_buf[768];
 static const char *diag_active_text;
 static size_t diag_pos;
 static uint32_t diag_active_keycode;
@@ -290,6 +290,49 @@ static int format_conn_line(char *buf, size_t size, const char *label, struct bt
                     label, int_x100 / 100, int_x100 % 100, hz, interval, info.le.latency,
                     timeout_ms);
 }
+
+// Host PC link drops since boot, so a 4-5 s input stop can be told apart from a firmware stall.
+static uint32_t host_disc_count;
+static uint8_t host_disc_reason;
+static uint32_t host_disc_uptime_s;
+
+static void host_disc_conn_disconnected(struct bt_conn *conn, uint8_t reason) {
+    struct bt_conn_info info;
+    if (bt_conn_get_info(conn, &info) != 0 || info.role != BT_CONN_ROLE_PERIPHERAL) {
+        return;
+    }
+    host_disc_count++;
+    host_disc_reason = reason;
+    host_disc_uptime_s = (uint32_t)(k_uptime_get() / MSEC_PER_SEC);
+}
+
+BT_CONN_CB_DEFINE(host_disc_conn_callbacks) = {
+    .disconnected = host_disc_conn_disconnected,
+};
+
+static const char *host_disc_reason_label(uint8_t reason) {
+    switch (reason) {
+    case BT_HCI_ERR_CONN_TIMEOUT:
+        return "RF timeout";
+    case BT_HCI_ERR_REMOTE_USER_TERM_CONN:
+        return "PC closed";
+    case BT_HCI_ERR_LOCALHOST_TERM_CONN:
+        return "KB closed";
+    case BT_HCI_ERR_LL_RESP_TIMEOUT:
+        return "LL timeout";
+    default:
+        return "Other";
+    }
+}
+
+static int format_host_disc_line(char *buf, size_t size) {
+    if (host_disc_count == 0) {
+        return snprintf(buf, size, "[Host Disc] none since boot\n");
+    }
+    return snprintf(buf, size, "[Host Disc] n:%u | last:0x%02x (%s) at up:%us\n",
+                    host_disc_count, host_disc_reason, host_disc_reason_label(host_disc_reason),
+                    host_disc_uptime_s);
+}
 #endif
 
 static void build_ble_diag_report(char *buf, size_t size) {
@@ -331,6 +374,9 @@ static void build_ble_diag_report(char *buf, size_t size) {
     }
     if (off > 0 && (size_t)off < size) {
         off += format_conn_line(buf + off, size - off, "Left KB", split_conn, "Scanning!");
+    }
+    if (off > 0 && (size_t)off < size) {
+        off += format_host_disc_line(buf + off, size - off);
     }
     if (host_conn != NULL) {
         bt_conn_unref(host_conn);
@@ -519,6 +565,27 @@ ZMK_SUBSCRIPTION(behavior_inertia_layer, zmk_layer_state_changed);
 bool iqs5xx_is_ble_transport(void) {
     return zmk_endpoint_get_selected().transport == ZMK_TRANSPORT_BLE;
 }
+
+#if IS_ENABLED(CONFIG_ZMK_BLE) && IS_ENABLED(CONFIG_ZMK_POINTING)
+// Not in a ZMK header: defined non-static by K_MSGQ_DEFINE in zmk/app/src/hog.c (pinned revision).
+extern struct k_msgq zmk_hog_mouse_msgq;
+
+uint32_t iqs5xx_ble_mouse_queue_used(void) { return k_msgq_num_used_get(&zmk_hog_mouse_msgq); }
+
+int iqs5xx_ble_conn_interval_ms(void) {
+    struct bt_conn *conn = zmk_ble_active_profile_conn();
+    if (conn == NULL) {
+        return 0;
+    }
+    struct bt_conn_info info;
+    int ms = 0;
+    if (bt_conn_get_info(conn, &info) == 0 && info.state == BT_CONN_STATE_CONNECTED) {
+        ms = DIV_ROUND_UP((int)info.le.interval * 5, 4);
+    }
+    bt_conn_unref(conn);
+    return ms;
+}
+#endif
 
 #if IS_ENABLED(CONFIG_BT) && defined(BT_HCI_OP_VS_WRITE_TX_POWER_LEVEL)
 static void set_handle_tx_power(uint8_t handle_type, uint16_t handle, int8_t dbm) {
