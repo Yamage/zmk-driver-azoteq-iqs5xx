@@ -98,11 +98,6 @@ static void iqs5xx_report_cursor(struct iqs5xx_data *data, int32_t dx, int32_t d
 
     int64_t elapsed = k_uptime_get() - data->last_ble_emit_ms;
     int64_t min_ms = config->ble_min_report_interval_ms;
-    if (data->rf_robust_mode && min_ms < 16) {
-        // In RF robust mode, widen the coalescing window to 16 ms so that a link retry
-        // on a noisy channel absorbs into the next packet instead of queuing a backlog.
-        min_ms = 16;
-    }
     if (elapsed >= min_ms) {
         k_work_cancel_delayable(&data->ble_flush_work);
         iqs5xx_emit_cursor_now(data);
@@ -878,14 +873,17 @@ static int iqs5xx_setup_device(const struct device *dev) {
     }
 
     /*
-     * Configure report rates (0x057A..0x0583) and mode timeouts (0x0584..0x0587)
-     * in a single 14-byte contiguous I2C burst write so the bus time stays minimal:
-     * - Active rate: config->active_report_rate (default 8 ms = 125 Hz)
-     * - Idle Touch rate: 25 ms (40 Hz) while finger rests without moving
-     * - Idle rate: 30 ms (33 Hz) just after release for instant wake
-     * - LP1 rate: 50 ms (20 Hz), LP2 rate: 100 ms (10 Hz) for deep idle
-     * - Timeouts (in 500 ms units): Active->Idle after 1 s (2),
-     *   IdleTouch->Idle after 2 s (4), Idle->LP1 after 2 s (4), LP1->LP2 after 10 s (20).
+     * Configure report rates (0x057A..0x0583, in ms) and mode timeouts (0x0584..0x0586
+     * in seconds, 0x0587 in 20-second units; 255 = never timeout) in a single 14-byte
+     * contiguous I2C burst write so the bus time stays minimal:
+     * - Active & Idle-Touch rate: config->active_report_rate (8 ms = 125 Hz) so a resting
+     *   thumb never drops to a slower scan rate before moving again
+     * - Idle rate: 16 ms (~62.5 Hz) after release for instant wake
+     * - LP1 rate: 32 ms, LP2 rate: 64 ms for deep idle
+     * - Timeouts: Active->Idle after 10 s (10), Idle-Touch timeout disabled (255 = never
+     *   reseed while a finger rests on the pad, which would calibrate out the thumb and
+     *   freeze the cursor for several seconds), Idle->LP1 after 30 s (30), and LP1->LP2
+     *   after 60 s (3 * 20 s).
      */
     uint16_t act_rate =
         config->active_report_rate ? config->active_report_rate : IQS5XX_DEFAULT_REPORT_MS;
@@ -894,14 +892,15 @@ static int iqs5xx_setup_device(const struct device *dev) {
         IQS5XX_ACTIVE_REPORT_RATE & 0xFF,
         (uint8_t)(act_rate >> 8),
         (uint8_t)(act_rate & 0xFF),
-        0, 25,  // IDLE_TOUCH_REPORT_RATE = 25 ms
-        0, 30,  // IDLE_REPORT_RATE = 30 ms
-        0, 50,  // LP1_REPORT_RATE = 50 ms
-        0, 100, // LP2_REPORT_RATE = 100 ms
-        2,      // ACTIVE_TIMEOUT = 1 s
-        4,      // IDLE_TOUCH_TIMEOUT = 2 s
-        4,      // IDLE_TIMEOUT = 2 s
-        20,     // LP1_TIMEOUT = 10 s
+        (uint8_t)(act_rate >> 8),
+        (uint8_t)(act_rate & 0xFF), // IDLE_TOUCH_REPORT_RATE = act_rate (8 ms)
+        0, 16,  // IDLE_REPORT_RATE = 16 ms
+        0, 32,  // LP1_REPORT_RATE = 32 ms
+        0, 64,  // LP2_REPORT_RATE = 64 ms
+        10,     // ACTIVE_TIMEOUT = 10 s
+        255,    // IDLE_TOUCH_TIMEOUT = never (do not reseed while finger rests on pad)
+        30,     // IDLE_TIMEOUT = 30 s
+        3,      // LP1_TIMEOUT = 60 s (3 * 20 s)
     };
     ret = i2c_write_dt(&config->i2c, power_Profile, sizeof(power_Profile));
     if (ret < 0) {
@@ -1022,8 +1021,10 @@ static int iqs5xx_setup_device(const struct device *dev) {
         return ret;
     }
 
-    // Configure system settings.
-    ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_0, IQS5XX_SETUP_COMPLETE | IQS5XX_WDT);
+    // Configure system settings (keep Re-ATI enabled so the chip automatically
+    // recovers from capacitance drift or abnormal count deltas).
+    ret = iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONFIG_0,
+                            IQS5XX_SETUP_COMPLETE | IQS5XX_WDT | IQS5XX_REATI | IQS5XX_ALP_REATI);
     if (ret < 0) {
         LOG_ERR("Failed to configure system: %d", ret);
         return ret;

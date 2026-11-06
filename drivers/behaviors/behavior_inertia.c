@@ -556,15 +556,21 @@ void iqs5xx_apply_rf_power(bool robust) {
     bt_conn_foreach(BT_CONN_TYPE_LE, apply_conn_tx_power_cb, &dbm);
 }
 
+static void rf_tx_power_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    iqs5xx_apply_rf_power(iqs5xx_is_rf_robust_mode());
+}
+
+static K_WORK_DEFINE(rf_tx_power_work, rf_tx_power_work_handler);
+
 static void rf_conn_connected(struct bt_conn *conn, uint8_t err) {
+    ARG_UNUSED(conn);
     if (err != 0) {
         return;
     }
-    uint16_t handle;
-    if (bt_hci_get_conn_handle(conn, &handle) == 0) {
-        int8_t dbm = iqs5xx_is_rf_robust_mode() ? 8 : 4;
-        set_handle_tx_power(BT_HCI_VS_LL_HANDLE_TYPE_CONN, handle, dbm);
-    }
+    // Run the synchronous HCI TX power command on the system workqueue rather
+    // than inside the BLE connection callback (BT RX thread).
+    k_work_submit(&rf_tx_power_work);
 }
 
 BT_CONN_CB_DEFINE(rf_power_conn_callbacks) = {

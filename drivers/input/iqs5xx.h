@@ -19,7 +19,8 @@
 
 #define IQS5XX_END_COMM_WINDOW 0xEEEE
 
-// Report rates (ms, 2 bytes each) and mode timeouts (in 500 ms units, 1 byte each).
+// Report rates (ms, 2 bytes each) and mode timeouts (0x0584..0x0586 in seconds,
+// 0x0587 LP1 timeout in 20-second units; 255 = never timeout).
 #define IQS5XX_ACTIVE_REPORT_RATE 0x057A
 #define IQS5XX_IDLE_TOUCH_REPORT_RATE 0x057C
 #define IQS5XX_IDLE_REPORT_RATE 0x057E
@@ -259,7 +260,7 @@ struct iqs5xx_data {
     // Runtime-tunable inertia and cursor parameters (initialised from the
     // devicetree defaults, then overridden by saved settings and keymap controls).
     bool inertia_enabled;          // Master on/off, toggled from the keymap.
-    bool rf_robust_mode;           // True = +8 dBm TX power + 16 ms BLE coalescing; False = +4 dBm normal.
+    bool rf_robust_mode;           // True = +8 dBm TX power; False = +4 dBm normal.
     uint16_t inertia_friction_rt;  // Live friction (retained/256 per tick).
     uint16_t inertia_min_speed_rt; // Live min release speed (counts/report).
     int16_t rotation_deg_rt;       // Live cursor rotation in degrees.

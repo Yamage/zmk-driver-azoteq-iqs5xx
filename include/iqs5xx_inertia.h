@@ -43,7 +43,7 @@ void iqs5xx_adjust_cursor_scale(int delta_pct);
 // Adjust horizontal (X-axis) cursor scale in percent relative to Y (100 = 1:1, 175 = 1.75x).
 void iqs5xx_adjust_x_scale(int delta_pct);
 
-// Toggle RF robust mode (+8 dBm TX power + anti-backlog BLE coalescing vs +4 dBm normal).
+// Toggle RF robust mode (+8 dBm TX power vs +4 dBm normal).
 void iqs5xx_toggle_rf_robust_mode(void);
 
 // True when RF robust mode (+8 dBm) is currently enabled.
