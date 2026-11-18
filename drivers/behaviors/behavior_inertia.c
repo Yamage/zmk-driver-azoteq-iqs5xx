@@ -57,6 +57,7 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #define INERTIA_RF_ROBUST_TOGGLE 14
 #define INERTIA_SCROLL_SPEED_UP 15
 #define INERTIA_SCROLL_SPEED_DOWN 16
+#define INERTIA_RECALIBRATE 17
 
 /* Tuning step sizes for the adjustable parameters. */
 #define INERTIA_FRICTION_STEP 8
@@ -117,8 +118,8 @@ static const char keymap_guide_ascii[] =
     "..    ..    ..    ..    ..    ..    | ..    ..    ..    Guide ..    ..\n"
     "..    ..    ..    ..    ..    ..    | ..    BTCLR OutTg Unlck RFMod ..\n"
     "\n"
-    "[L7 Touchpad (Fric=glide, MSpd=flick, Rot=angle, Spd=speed, X=horiz%, Scr=scroll/host)]\n"
-    "..    ..    ..    ..    ..    ..    | ..    Fric+ Fric- MSpd+ MSpd- ..\n"
+    "[L7 Touchpad (Fric=glide, MSpd=flick, Recal=re-init, Rot=angle, Spd=speed, X=horiz%, Scr=scroll/host)]\n"
+    "..    ..    ..    ..    ..    ..    | ..    Fric+ Fric- MSpd+ MSpd- Recal\n"
     "..    ..    ..    ..    ..    ..    | ..    Inert Rot+  Rot-  Spd+  Spd-\n"
     "..    ..    ..    ..    ..    ..    | ..    Reset X+    X-    Scr+  Scr-\n";
 
@@ -517,6 +518,9 @@ static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
         break;
     case INERTIA_RF_ROBUST_TOGGLE:
         iqs5xx_toggle_rf_robust_mode();
+        break;
+    case INERTIA_RECALIBRATE:
+        iqs5xx_recalibrate();
         break;
 #if IS_ENABLED(CONFIG_ZMK_INPUT_PROCESSOR_SCROLL_SPEED)
     case INERTIA_SCROLL_SPEED_UP:

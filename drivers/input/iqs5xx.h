@@ -233,6 +233,10 @@ struct iqs5xx_data {
     uint8_t glide_mode;  // IQS5XX_GLIDE_* : last motion kind, used while gliding.
     int32_t glide_gain_q8; // Acceleration gain at release, applied to the whole glide.
     struct k_work inertia_stop_work; // Stops a glide from outside the report queue.
+    struct k_work recalibrate_work;  // Hardware reset + re-ATI + register setup on the report queue.
+    uint16_t abnormal_touch_reports; // Consecutive palm / multi-blob reports (wet finger / ghost touch).
+    uint16_t low_motion_reports;     // Consecutive micro-jitter / stationary reports while fingers > 0.
+    int64_t last_reseed_ms;          // Uptime of the last forced reseed or Auto-ATI recovery.
     int32_t accel_x_acc; // Q8 fractional carry for accelerated cursor output.
     int32_t accel_y_acc;
     int32_t ble_pending_x; // Coalesced cursor deltas waiting for the next BLE send window.

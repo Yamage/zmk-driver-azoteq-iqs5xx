@@ -31,8 +31,13 @@ void iqs5xx_inertia_adjust_friction(int delta);
 // Positive delta = needs a stronger flick. Clamped to a sensible range.
 void iqs5xx_inertia_adjust_min_speed(int delta);
 
-// Restore enabled state, friction and min-speed to the devicetree defaults.
+// Restore enabled state, friction and min-speed to the devicetree defaults,
+// and recalibrate/re-initialize the trackpad hardware.
 void iqs5xx_inertia_reset(void);
+
+// Hardware-reset (or Auto-ATI + Reseed) and re-apply all IQS5xx register settings
+// without altering the user's saved runtime speed/rotation/inertia preferences.
+void iqs5xx_recalibrate(void);
 
 // Stop an ongoing glide immediately (no-op when not gliding).
 void iqs5xx_inertia_stop(void);

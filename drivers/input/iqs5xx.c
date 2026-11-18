@@ -269,6 +269,39 @@ static void iqs5xx_inertia_stop_work_handler(struct k_work *work) {
     iqs5xx_glide_clear(CONTAINER_OF(work, struct iqs5xx_data, inertia_stop_work));
 }
 
+static void iqs5xx_reset_runtime_touch_state(struct iqs5xx_data *data) {
+    const struct device *dev = data->dev;
+
+    k_work_cancel_delayable(&data->button_release_work);
+    for (int i = 0; i < 3; i++) {
+        if (data->buttons_pressed & BIT(i)) {
+            input_report_key(dev, INPUT_BTN_0 + i, 0, true, K_FOREVER);
+            data->buttons_pressed &= ~BIT(i);
+        }
+    }
+    if (data->active_hold || data->drag_active) {
+        input_report_key(dev, LEFT_BUTTON_CODE, 0, true, K_FOREVER);
+        data->active_hold = false;
+        data->drag_active = false;
+    }
+
+    iqs5xx_glide_clear(data);
+    data->scroll_x_acc = 0;
+    data->scroll_y_acc = 0;
+    data->accel_x_acc = 0;
+    data->accel_y_acc = 0;
+    data->rot_x_acc = 0;
+    data->rot_y_acc = 0;
+    data->last_fingers = 0;
+    data->touch_reports = 0;
+    data->move_reports = 0;
+    data->idle_reports = 0;
+    data->abnormal_touch_reports = 0;
+    data->low_motion_reports = 0;
+    data->tap_drag_armed = false;
+    data->drag_ignore_tap = false;
+}
+
 // Approximate speed (Q8 counts/report) from a velocity vector: max + min/2.
 static int32_t iqs5xx_vec_speed_q8(int32_t vx, int32_t vy) {
     int32_t ax = abs(vx);
@@ -485,6 +518,14 @@ void iqs5xx_inertia_stop(void) {
     k_work_submit_to_queue(&iqs5xx_work_q, &data->inertia_stop_work);
 }
 
+void iqs5xx_recalibrate(void) {
+    struct iqs5xx_data *data = iqs5xx_inertia_data;
+    if (data == NULL) {
+        return;
+    }
+    k_work_submit_to_queue(&iqs5xx_work_q, &data->recalibrate_work);
+}
+
 void iqs5xx_inertia_reset(void) {
     struct iqs5xx_data *data = iqs5xx_inertia_data;
     const struct iqs5xx_config *config = iqs5xx_inertia_config;
@@ -500,7 +541,8 @@ void iqs5xx_inertia_reset(void) {
     data->x_scale_pct_rt = CLAMP(config->x_scale_pct, IQS5XX_X_SCALE_PCT_MIN, IQS5XX_X_SCALE_PCT_MAX);
     iqs5xx_update_rotation_trig(data);
     iqs5xx_apply_rf_power(false);
-    LOG_INF("Trackpad runtime settings reset to defaults");
+    iqs5xx_recalibrate();
+    LOG_INF("Trackpad runtime settings reset to defaults and hardware recalibration queued");
     iqs5xx_inertia_schedule_save(data);
 }
 
@@ -571,6 +613,16 @@ int iqs5xx_format_status(char *buf, size_t size) {
                     (unsigned)data->inertia_min_speed_rt);
 }
 
+static int iqs5xx_setup_device(const struct device *dev);
+
+// Minimum cooldown between automatic reseed / Auto-ATI recovery commands.
+#define IQS5XX_AUTO_RECOVERY_COOLDOWN_MS 500
+// Consecutive palm or multi-blob reports (~48 ms at 8 ms/report) before forcing a reseed.
+#define IQS5XX_ABNORMAL_TOUCH_RESEED_REPORTS 6
+// Consecutive micro-jitter reports (~12 s at 8 ms/report) with |rel| <= 3 before forcing a reseed.
+#define IQS5XX_LOW_MOTION_RESEED_REPORTS 1500
+#define IQS5XX_LOW_MOTION_MAX_DELTA 3
+
 static void iqs5xx_work_handler(struct k_work *work) {
     struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, work);
     const struct device *dev = data->dev;
@@ -605,12 +657,45 @@ static void iqs5xx_work_handler(struct k_work *work) {
     int16_t rel_x = (int16_t)((block[5] << 8) | block[6]);
     int16_t rel_y = (int16_t)((block[7] << 8) | block[8]);
 
-    // Handle reset indication.
+    /*
+     * Handle device reset indication: when the IQS5xx resets on its own (internal WDT,
+     * ESD, or brownout), all volatile registers revert to factory defaults (losing
+     * flip-y, resolution, event mode, thresholds, etc.). Clear driver touch state,
+     * acknowledge the reset, and re-apply the full setup immediately.
+     */
     if (sys_info_0 & IQS5XX_SHOW_RESET) {
-        LOG_INF("Device reset detected");
-        // Acknowledge reset.
+        LOG_WRN("Device reset detected; re-applying configuration");
+        iqs5xx_reset_runtime_touch_state(data);
         iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0, IQS5XX_ACK_RESET);
+        if (iqs5xx_setup_device(dev) == 0) {
+            return;
+        }
+        k_work_submit_to_queue(&iqs5xx_work_q, &data->recalibrate_work);
         goto end_comm;
+    }
+
+    /*
+     * Recover if Re-ATI failed (for example when triggered while a wet finger or water
+     * droplet was on the pad): request a fresh Auto-ATI so the sensor does not remain
+     * in an uncalibrated error state until power-cycled.
+     */
+    if (sys_info_0 & (IQS5XX_ATI_ERROR | IQS5XX_ALP_ATI_ERROR)) {
+        int64_t now = k_uptime_get();
+        if (now - data->last_reseed_ms >= IQS5XX_AUTO_RECOVERY_COOLDOWN_MS) {
+            LOG_WRN("ATI error (0x%02x), requesting Auto-ATI", sys_info_0);
+            data->last_reseed_ms = now;
+            iqs5xx_reset_runtime_touch_state(data);
+            iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0, IQS5XX_AUTO_ATI);
+        }
+        goto end_comm;
+    }
+
+    if (sys_info_0 & (IQS5XX_REATI_OCCURRED | IQS5XX_ALP_REATI_OCCURRED)) {
+        iqs5xx_glide_clear(data);
+        data->accel_x_acc = 0;
+        data->accel_y_acc = 0;
+        data->rot_x_acc = 0;
+        data->rot_y_acc = 0;
     }
 
     bool tp_movement = (sys_info_1 & IQS5XX_TP_MOVEMENT) != 0;
@@ -621,8 +706,67 @@ static void iqs5xx_work_handler(struct k_work *work) {
         data->scroll_y_acc = 0;
     }
 
-    // Touch/release edge detection for the inertia glide.
     uint8_t fingers = block[4];
+    bool multi_finger_unused = !config->two_finger_tap && !config->scroll;
+    bool abnormal_contact =
+        (sys_info_1 & (IQS5XX_PALM_DETECT | IQS5XX_TOO_MANY_FINGERS)) != 0 ||
+        (multi_finger_unused && fingers > 1);
+
+    /*
+     * Wet-finger / palm / ghost-touch protection:
+     * Moisture left on the pad can hold a phantom Finger 1 touch while the real thumb
+     * registers as Finger 2 (fingers > 1), or spread capacitance across electrodes
+     * (PALM_DETECT / TOO_MANY_FINGERS). Suppress erratic centroid jumps during such
+     * frames and force a reference reseed if the condition persists.
+     */
+    if (abnormal_contact) {
+        iqs5xx_glide_clear(data);
+        data->accel_x_acc = 0;
+        data->accel_y_acc = 0;
+        data->rot_x_acc = 0;
+        data->rot_y_acc = 0;
+        if (data->abnormal_touch_reports < UINT16_MAX) {
+            data->abnormal_touch_reports++;
+        }
+        int64_t now = k_uptime_get();
+        if (data->abnormal_touch_reports >= IQS5XX_ABNORMAL_TOUCH_RESEED_REPORTS &&
+            now - data->last_reseed_ms >= IQS5XX_AUTO_RECOVERY_COOLDOWN_MS) {
+            LOG_WRN("Abnormal touch state (info1=0x%02x, fingers=%u), reseeding",
+                    sys_info_1, fingers);
+            data->last_reseed_ms = now;
+            data->abnormal_touch_reports = 0;
+            data->low_motion_reports = 0;
+            data->last_fingers = 0;
+            iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0,
+                              IQS5XX_RESEED | IQS5XX_ALP_RESEED);
+        }
+        goto end_comm;
+    }
+    data->abnormal_touch_reports = 0;
+
+    if (fingers > 0) {
+        if (abs(rel_x) <= IQS5XX_LOW_MOTION_MAX_DELTA &&
+            abs(rel_y) <= IQS5XX_LOW_MOTION_MAX_DELTA) {
+            if (data->low_motion_reports < UINT16_MAX) {
+                data->low_motion_reports++;
+            }
+            int64_t now = k_uptime_get();
+            if (data->low_motion_reports >= IQS5XX_LOW_MOTION_RESEED_REPORTS &&
+                now - data->last_reseed_ms >= IQS5XX_AUTO_RECOVERY_COOLDOWN_MS) {
+                LOG_WRN("Stuck low-motion touch detected, reseeding");
+                data->last_reseed_ms = now;
+                data->low_motion_reports = 0;
+                data->last_fingers = 0;
+                iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0,
+                                  IQS5XX_RESEED | IQS5XX_ALP_RESEED);
+                goto end_comm;
+            }
+        } else {
+            data->low_motion_reports = 0;
+        }
+    } else {
+        data->low_motion_reports = 0;
+    }
     if (fingers > 0 && data->last_fingers == 0) {
         // A new touch instantly stops any ongoing glide.
         iqs5xx_glide_clear(data);
@@ -913,9 +1057,9 @@ static int iqs5xx_setup_device(const struct device *dev) {
      *   thumb never drops to a slower scan rate before moving again
      * - Idle rate: 16 ms (~62.5 Hz) after release for instant wake
      * - LP1 rate: 32 ms, LP2 rate: 64 ms for deep idle
-     * - Timeouts: Active->Idle after 10 s (10), Idle-Touch timeout disabled (255 = never
-     *   reseed while a finger rests on the pad, which would calibrate out the thumb and
-     *   freeze the cursor for several seconds), Idle->LP1 after 30 s (30), and LP1->LP2
+     * - Timeouts: Active->Idle after 10 s (10), Idle-Touch->Idle after 30 s (30 = long
+     *   enough that a resting thumb is not reseeded during normal pauses, while moisture
+     *   left on the pad still auto-reseeds), Idle->LP1 after 30 s (30), and LP1->LP2
      *   after 60 s (3 * 20 s).
      */
     uint16_t act_rate =
@@ -931,7 +1075,7 @@ static int iqs5xx_setup_device(const struct device *dev) {
         0, 32,  // LP1_REPORT_RATE = 32 ms
         0, 64,  // LP2_REPORT_RATE = 64 ms
         10,     // ACTIVE_TIMEOUT = 10 s
-        255,    // IDLE_TOUCH_TIMEOUT = never (do not reseed while finger rests on pad)
+        30,     // IDLE_TOUCH_TIMEOUT = 30 s (auto-reseed stuck moisture touch)
         30,     // IDLE_TIMEOUT = 30 s
         3,      // LP1_TIMEOUT = 60 s (3 * 20 s)
     };
@@ -1021,14 +1165,22 @@ static int iqs5xx_setup_device(const struct device *dev) {
             }
             data->touch_mult_read = true;
         }
-        // Raise only the set threshold: a hover never sets a touch, while keeping the module's clear
-        // threshold stops a light, slow-moving touch from flickering out.
+        /*
+         * Raise the set threshold by the full increase so a hovering finger never triggers
+         * a touch, and raise the clear threshold by half of the increase: this preserves
+         * extra hysteresis so a light slow thumb touch does not flicker out, while lifting
+         * the release floor enough that a thin moisture film after a wet touch drops below
+         * clear instead of holding the touch state open forever.
+         */
         uint8_t set = MIN(data->touch_mult_base[0] + config->touch_threshold_increase, UINT8_MAX);
-        LOG_INF("Touch multiplier set %u -> %u, clear %u (kept)", data->touch_mult_base[0], set,
-                data->touch_mult_base[1]);
-        ret = iqs5xx_write_reg8(dev, IQS5XX_GLOBAL_TOUCH_SET, set);
+        uint8_t clear_inc = (config->touch_threshold_increase + 1) / 2;
+        uint8_t clear_cap = set > 1 ? (uint8_t)(set - 1) : set;
+        uint8_t clear = MIN(data->touch_mult_base[1] + clear_inc, clear_cap);
+        LOG_INF("Touch multiplier set %u -> %u, clear %u -> %u", data->touch_mult_base[0], set,
+                data->touch_mult_base[1], clear);
+        ret = iqs5xx_write_reg16(dev, IQS5XX_GLOBAL_TOUCH_SET, ((uint16_t)set << 8) | clear);
         if (ret < 0) {
-            LOG_ERR("Failed to set the touch multiplier: %d", ret);
+            LOG_ERR("Failed to set the touch multipliers: %d", ret);
             return ret;
         }
     }
@@ -1073,6 +1225,58 @@ static int iqs5xx_setup_device(const struct device *dev) {
     return 0;
 }
 
+static void iqs5xx_recalibrate_work_handler(struct k_work *work) {
+    struct iqs5xx_data *data = CONTAINER_OF(work, struct iqs5xx_data, recalibrate_work);
+    const struct device *dev = data->dev;
+    const struct iqs5xx_config *config = dev->config;
+    int ret = -EIO;
+
+    if (!data->initialized) {
+        return;
+    }
+
+    LOG_INF("Recalibrating IQS5xx trackpad");
+    gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_DISABLE);
+    k_work_cancel(&data->work);
+    iqs5xx_reset_runtime_touch_state(data);
+
+    if (config->reset_gpio.port) {
+        gpio_pin_set_dt(&config->reset_gpio, 1);
+        k_msleep(2);
+        gpio_pin_set_dt(&config->reset_gpio, 0);
+        k_msleep(10);
+    }
+
+    for (int attempt = 0; attempt < 10; attempt++) {
+        int waited = 0;
+        while (gpio_pin_get_dt(&config->rdy_gpio) <= 0 && waited < 100) {
+            k_msleep(1);
+            waited++;
+        }
+
+        if (!config->reset_gpio.port) {
+            iqs5xx_write_reg8(dev, IQS5XX_SYSTEM_CONTROL_0,
+                              IQS5XX_ACK_RESET | IQS5XX_AUTO_ATI | IQS5XX_RESEED |
+                                  IQS5XX_ALP_RESEED);
+        }
+
+        ret = iqs5xx_setup_device(dev);
+        if (ret == 0) {
+            break;
+        }
+
+        LOG_WRN("Recalibrate attempt %d failed (%d), retrying", attempt + 1, ret);
+        k_msleep(10);
+    }
+
+    if (ret < 0) {
+        LOG_ERR("Failed to recalibrate IQS5xx: %d", ret);
+    }
+
+    data->last_reseed_ms = k_uptime_get();
+    gpio_pin_interrupt_configure_dt(&config->rdy_gpio, GPIO_INT_EDGE_RISING);
+}
+
 static int iqs5xx_init(const struct device *dev) {
     const struct iqs5xx_config *config = dev->config;
     struct iqs5xx_data *data = dev->data;
@@ -1089,6 +1293,7 @@ static int iqs5xx_init(const struct device *dev) {
     k_work_init_delayable(&data->inertia_work, iqs5xx_inertia_work_handler);
     k_work_init_delayable(&data->ble_flush_work, iqs5xx_ble_flush_work_handler);
     k_work_init(&data->inertia_stop_work, iqs5xx_inertia_stop_work_handler);
+    k_work_init(&data->recalibrate_work, iqs5xx_recalibrate_work_handler);
 
     // Seed the runtime inertia and cursor parameters from the devicetree defaults;
     // saved settings (if any) override these at the APPLICATION init phase.
