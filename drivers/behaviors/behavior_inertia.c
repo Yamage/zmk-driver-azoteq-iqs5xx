@@ -23,6 +23,7 @@
 #include <zmk/battery.h>
 #include <zmk/endpoints.h>
 #include <zmk/event_manager.h>
+#include <zmk/events/battery_state_changed.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/split/central.h>
@@ -336,6 +337,67 @@ static int format_host_disc_line(char *buf, size_t size) {
 }
 #endif
 
+struct batt_drain_tracker {
+    int64_t start_ms;
+    uint8_t start_soc;
+    uint8_t last_soc;
+};
+
+static struct batt_drain_tracker left_batt_tracker;
+static struct batt_drain_tracker right_batt_tracker;
+
+static void batt_tracker_update(struct batt_drain_tracker *t, uint8_t soc) {
+    if (soc == 0 || soc > 100) {
+        return;
+    }
+    int64_t now_ms = k_uptime_get();
+    /*
+     * Record the initial reading, or reset the baseline if the battery was
+     * charged (a >= 2% jump over the previous reading or above the baseline;
+     * a 1% bounce below start_soc from ADC jitter does not reset the timer).
+     */
+    if (t->start_soc == 0 || soc > t->start_soc || soc >= (uint8_t)(t->last_soc + 2)) {
+        t->start_soc = soc;
+        t->start_ms = now_ms;
+    }
+    t->last_soc = soc;
+}
+
+static void format_duration_short(char *buf, size_t size, uint32_t elapsed_s) {
+    if (elapsed_s < 60) {
+        snprintf(buf, size, "%us", elapsed_s);
+    } else if (elapsed_s < 3600) {
+        snprintf(buf, size, "%um", elapsed_s / 60);
+    } else {
+        snprintf(buf, size, "%uh%02um", elapsed_s / 3600, (elapsed_s % 3600) / 60);
+    }
+}
+
+static void format_batt_entry(char *buf, size_t size, uint8_t soc,
+                              const struct batt_drain_tracker *t, int64_t now_ms) {
+    if (soc == 0) {
+        snprintf(buf, size, "--%%");
+        return;
+    }
+    if (t->start_soc == 0 || now_ms <= t->start_ms) {
+        snprintf(buf, size, "%u%% (-0%%/0s)", soc);
+        return;
+    }
+    uint32_t elapsed_s = (uint32_t)((now_ms - t->start_ms) / MSEC_PER_SEC);
+    char dur[16];
+    format_duration_short(dur, sizeof(dur), elapsed_s);
+
+    if (soc >= t->start_soc || elapsed_s == 0) {
+        snprintf(buf, size, "%u%% (-0%%/%s)", soc, dur);
+        return;
+    }
+
+    uint8_t drop = t->start_soc - soc;
+    uint32_t rate_x10 = ((uint32_t)drop * 36000U + elapsed_s / 2U) / elapsed_s;
+    snprintf(buf, size, "%u%% (-%u%%/%s, %u.%u%%/h)", soc, drop, dur, rate_x10 / 10U,
+             rate_x10 % 10U);
+}
+
 static void build_ble_diag_report(char *buf, size_t size) {
     bool is_ble = zmk_endpoint_get_selected().transport == ZMK_TRANSPORT_BLE;
     int profile = 0;
@@ -343,8 +405,9 @@ static void build_ble_diag_report(char *buf, size_t size) {
     profile = zmk_ble_active_profile_index();
 #endif
     uint8_t right_batt = 0;
-#if IS_ENABLED(CONFIG_ZMK_BATTERY)
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
     right_batt = zmk_battery_state_of_charge();
+    batt_tracker_update(&right_batt_tracker, right_batt);
 #endif
 
     struct bt_conn *host_conn = NULL;
@@ -354,19 +417,27 @@ static void build_ble_diag_report(char *buf, size_t size) {
     bt_conn_foreach(BT_CONN_TYPE_LE, find_split_conn_cb, &split_conn);
 #endif
 
-    char left_batt_str[12] = "--%";
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     uint8_t left_batt = 0;
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
     if (split_conn != NULL &&
         zmk_split_central_get_peripheral_battery_level(0, &left_batt) == 0 && left_batt > 0) {
-        snprintf(left_batt_str, sizeof(left_batt_str), "%u%%", left_batt);
+        batt_tracker_update(&left_batt_tracker, left_batt);
+    } else {
+        left_batt = 0;
     }
 #endif
 
+    int64_t now_ms = k_uptime_get();
+    char left_batt_str[36];
+    char right_batt_str[36];
+    format_batt_entry(left_batt_str, sizeof(left_batt_str), left_batt, &left_batt_tracker, now_ms);
+    format_batt_entry(right_batt_str, sizeof(right_batt_str), right_batt, &right_batt_tracker,
+                      now_ms);
+
     int off = snprintf(buf, size,
                        "=== My Keyboard Status ===\n"
-                       "[Out] %s (Profile %d) | [Batt] L:%s / R:%u%%\n",
-                       is_ble ? "BLE" : "USB", profile, left_batt_str, right_batt);
+                       "[Out] %s (Profile %d) | [Batt] L:%s / R:%s\n",
+                       is_ble ? "BLE" : "USB", profile, left_batt_str, right_batt_str);
 
 #if IS_ENABLED(CONFIG_BT)
     if (off > 0 && (size_t)off < size) {
@@ -565,6 +636,31 @@ static int inertia_layer_state_listener(const zmk_event_t *eh) {
 
 ZMK_LISTENER(behavior_inertia_layer, inertia_layer_state_listener);
 ZMK_SUBSCRIPTION(behavior_inertia_layer, zmk_layer_state_changed);
+
+#if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
+static int inertia_battery_state_listener(const zmk_event_t *eh) {
+    const struct zmk_battery_state_changed *batt_ev = as_zmk_battery_state_changed(eh);
+    if (batt_ev != NULL) {
+        batt_tracker_update(&right_batt_tracker, batt_ev->state_of_charge);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+    const struct zmk_peripheral_battery_state_changed *periph_ev =
+        as_zmk_peripheral_battery_state_changed(eh);
+    if (periph_ev != NULL && periph_ev->source == 0) {
+        batt_tracker_update(&left_batt_tracker, periph_ev->state_of_charge);
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+#endif
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+ZMK_LISTENER(behavior_inertia_battery, inertia_battery_state_listener);
+ZMK_SUBSCRIPTION(behavior_inertia_battery, zmk_battery_state_changed);
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING)
+ZMK_SUBSCRIPTION(behavior_inertia_battery, zmk_peripheral_battery_state_changed);
+#endif
+#endif
 
 bool iqs5xx_is_ble_transport(void) {
     return zmk_endpoint_get_selected().transport == ZMK_TRANSPORT_BLE;
